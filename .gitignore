@@ -22,6 +22,9 @@ env/
 logs/*
 !logs/.gitkeep
 *.log
+# parsed
+output/*
+!output/.gitkeep
 
 # Build artifacts
 build/
