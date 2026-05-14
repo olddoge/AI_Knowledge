@@ -36,3 +36,18 @@ def get_required_config(config: dict[str, str], key: str) -> str:
     if not value:
         raise ValueError(f"Missing required config: {key}")
     return value
+
+
+def get_bool_config(config: dict[str, str], key: str, default: bool = False) -> bool:
+    """读取布尔配置，支持 true/false、yes/no、on/off、1/0。"""
+    value = config.get(key)
+    if value is None or not value.strip():
+        return default
+
+    normalized_value = value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+
+    raise ValueError(f"Invalid boolean config {key}: {value}")
