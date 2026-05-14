@@ -51,3 +51,25 @@ def get_bool_config(config: dict[str, str], key: str, default: bool = False) -> 
         return False
 
     raise ValueError(f"Invalid boolean config {key}: {value}")
+
+
+def get_int_config(
+    config: dict[str, str],
+    key: str,
+    default: int,
+    min_value: int | None = None,
+) -> int:
+    """读取整数配置，并做最小值校验，避免关键参数无效。"""
+    value = config.get(key)
+    if value is None or not value.strip():
+        return default
+
+    try:
+        parsed_value = int(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer config {key}: {value}") from exc
+
+    if min_value is not None and parsed_value < min_value:
+        raise ValueError(f"Config {key} must be greater than or equal to {min_value}")
+
+    return parsed_value

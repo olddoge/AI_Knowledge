@@ -1,15 +1,17 @@
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from logging import Logger
+from threading import Event
 from typing import Callable
 
-from src.config import get_required_config
+from src.config import get_bool_config, get_int_config, get_required_config
 from src.data_cleaner.clean_task import run_clean_task
 from src.database import DatabaseConfig, build_database_config
 from src.file_scanner import scan_files_to_database
 from src.lightrag_ingest import run_lightrag_upload_task
-from src.parse_requester import run_parse_task
+from src.parse_requester import ParseTaskConfig, run_parse_task
 
 
 TaskRunner = Callable[[], dict[str, object]]
@@ -20,6 +22,7 @@ class PipelineConfig:
     scan_input_path: str
     db_config: DatabaseConfig
     ignored_file_types: set[str]
+    parse_task_config: ParseTaskConfig
 
 
 @dataclass(frozen=True)
@@ -30,45 +33,77 @@ class PipelineTask:
 
 def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
     """从环境配置构建主流程运行参数。"""
+    db_config = build_database_config(config)
     return PipelineConfig(
         scan_input_path=get_required_config(config, "SCAN_INPUT_PATH"),
-        db_config=build_database_config(config),
+        db_config=db_config,
         ignored_file_types=_parse_file_types(config.get("IGNORE_FILE_TYPES", "")),
+        parse_task_config=ParseTaskConfig(
+            db_config=db_config,
+            mineru_server_url=get_required_config(config, "MINERU_SERVER_URL"),
+            parse_output_path=get_required_config(config, "PARSE_OUTPUT_PATH"),
+            poll_interval_seconds=get_int_config(
+                config,
+                "PARSE_TASK_POLL_INTERVAL_SECONDS",
+                default=10,
+                min_value=1,
+            ),
+            batch_size=get_int_config(
+                config,
+                "PARSE_TASK_BATCH_SIZE",
+                default=5,
+                min_value=1,
+            ),
+            enable_logging=get_bool_config(config, "ENABLE_LOGGING", True),
+        ),
     )
 
 
 def run_pipeline(config: PipelineConfig, logger: Logger) -> dict[str, dict[str, object]]:
     """同时启动扫描、解析、清洗和 LightRAG 上传任务，并统一记录任务状态。"""
-    tasks = _build_tasks(config)
+    stop_event = Event()
+    tasks = _build_tasks(config, stop_event)
 
     logger.info("主流程启动，任务数量：%s", len(tasks))
     print("主流程启动，准备同时执行任务...")
 
-    task_results = _run_tasks(tasks, logger)
+    task_results = _run_tasks(tasks, logger, stop_event)
 
     logger.info("主流程结束，任务结果：%s", json.dumps(task_results, ensure_ascii=False))
     print("主流程执行结束。")
     return task_results
 
 
-def _build_tasks(config: PipelineConfig) -> list[PipelineTask]:
+def _build_tasks(config: PipelineConfig, stop_event: Event) -> list[PipelineTask]:
     return [
         PipelineTask(
             name="扫描任务",
-            runner=lambda: _run_scan_task(config),
+            runner=lambda: _run_scan_task(config, stop_event),
         ),
-        PipelineTask(name="解析任务", runner=run_parse_task),
+        PipelineTask(
+            name="解析任务",
+            runner=lambda: run_parse_task(config.parse_task_config, stop_event),
+        ),
         PipelineTask(name="清洗任务", runner=run_clean_task),
         PipelineTask(name="上传 LightRAG 任务", runner=run_lightrag_upload_task),
     ]
 
 
-def _run_scan_task(config: PipelineConfig) -> dict[str, object]:
+def _run_scan_task(config: PipelineConfig, stop_event: Event) -> dict[str, object]:
     result = scan_files_to_database(
         config.scan_input_path,
         db_config=config.db_config,
         ignored_file_types=config.ignored_file_types,
+        stop_event=stop_event,
     )
+
+    if result.get("stopped"):
+        return {
+            "task": "scan",
+            "status": "stopped",
+            "message": "扫描任务已停止，已提交本次已入库记录。",
+            "result": result,
+        }
 
     return {
         "task": "scan",
@@ -78,21 +113,56 @@ def _run_scan_task(config: PipelineConfig) -> dict[str, object]:
     }
 
 
-def _run_tasks(tasks: list[PipelineTask], logger: Logger) -> dict[str, dict[str, object]]:
+def _run_tasks(
+    tasks: list[PipelineTask],
+    logger: Logger,
+    stop_event: Event,
+) -> dict[str, dict[str, object]]:
     task_results: dict[str, dict[str, object]] = {}
+    executor = ThreadPoolExecutor(max_workers=len(tasks))
+    future_to_task: dict[Future, PipelineTask] = {}
 
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_task = {}
+    try:
         for task in tasks:
             logger.info("%s 已启动", task.name)
             print(f"{task.name} 已启动")
             future_to_task[executor.submit(task.runner)] = task
 
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            task_results[task.name] = _collect_task_result(task, future, logger)
+        while len(task_results) < len(future_to_task):
+            for future, task in list(future_to_task.items()):
+                if future.done() and task.name not in task_results:
+                    task_results[task.name] = _collect_task_result(task, future, logger)
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        logger.warning("收到手动终止信号，正在通知任务停止。")
+        print("收到手动终止信号，正在通知任务停止...")
+        stop_event.set()
+        for future in future_to_task:
+            future.cancel()
+        _wait_running_tasks(future_to_task, task_results, logger)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
     return task_results
+
+
+def _wait_running_tasks(
+    future_to_task: dict[Future, PipelineTask],
+    task_results: dict[str, dict[str, object]],
+    logger: Logger,
+) -> None:
+    for future, task in future_to_task.items():
+        if task.name in task_results:
+            continue
+        if future.cancelled():
+            task_results[task.name] = {
+                "task": task.name,
+                "status": "cancelled",
+                "message": "任务已取消。",
+            }
+            continue
+
+        task_results[task.name] = _collect_task_result(task, future, logger)
 
 
 def _collect_task_result(task: PipelineTask, future, logger: Logger) -> dict[str, object]:

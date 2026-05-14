@@ -27,7 +27,7 @@ def request_pdf_parse(
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
 ) -> list[dict[str, object]]:
-    """请求 MinerU /file_parse 接口解析扫描出的 PDF 文件。"""
+    """请求 MinerU /file_parse 接口解析文件，目前用于 PDF 和 DOCX。"""
     logger = setup_module_logger(PDF_PARSE_MODULE_NAME, enable_logging=enable_logging)
 
     if not files:
@@ -37,7 +37,7 @@ def request_pdf_parse(
     max_workers = max(1, parse_request_concurrency)
     batch_size = max(1, parse_request_batch_size)
     file_batches = _chunk_files(files, batch_size)
-    logger.info("PDF 解析并发请求数量：%s，单次请求文件数量：%s", max_workers, batch_size)
+    logger.info("文件解析并发请求数量：%s，单次请求文件数量：%s", max_workers, batch_size)
 
     # PDF 解析接口需要等待返回，按批次并发处理，兼顾吞吐量和服务端压力。
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -75,8 +75,8 @@ def _request_pdf_parse_batch(
     batch_index: int,
     batch_count: int,
 ) -> list[dict[str, object]]:
-    """批量请求 /file_parse，一个请求中可同时携带多个 PDF 文件。"""
-    print(f"正在解析 PDF 批次 {batch_index}/{batch_count}，文件数：{len(files)}")
+    """批量请求 /file_parse，一个请求中可同时携带多个文件。"""
+    print(f"正在解析文件批次 {batch_index}/{batch_count}，文件数：{len(files)}")
     endpoint = _build_file_parse_url(mineru_server_url)
     request_fields = _build_parse_fields()
     request_files = _build_request_files(files)
@@ -143,7 +143,7 @@ def _save_markdown_from_response(
 
     output_dir = Path(parse_output_path).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{Path(file_info['file_name']).stem}.md"
+    output_file = output_dir / f"{file_info.get('file_uid') or Path(file_info['file_name']).stem}.md"
     output_file.write_text(markdown_content, encoding="utf-8")
     logger.info("PDF markdown 已保存：%s", output_file)
     return str(output_file)
@@ -170,6 +170,7 @@ def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str,
     """按原文件名、文件 stem、绝对路径等常见 key 查找解析结果。"""
     file_path = Path(file_info["absolute_path"])
     candidate_keys = (
+        file_info.get("file_uid", ""),
         file_info["file_name"],
         file_path.name,
         file_path.stem,
@@ -190,6 +191,7 @@ def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str,
 def _find_result_item_from_list(results: list[object], file_info: dict[str, str]) -> object:
     """从列表结构中按文件名字段匹配当前文件的解析结果。"""
     file_name = file_info["file_name"]
+    file_uid = file_info.get("file_uid", "")
     file_stem = Path(file_name).stem
 
     for item in results:
@@ -200,10 +202,12 @@ def _find_result_item_from_list(results: list[object], file_info: dict[str, str]
             item.get("file_name")
             or item.get("filename")
             or item.get("name")
+            or item.get("file_uid")
+            or item.get("uid")
             or item.get("original_file_name")
             or ""
         )
-        if item_name in {file_name, file_stem}:
+        if item_name in {file_uid, file_name, file_stem}:
             return item
 
     if len(results) == 1:
@@ -255,7 +259,7 @@ def _build_parse_fields() -> list[tuple[str, str]]:
 
 
 def _build_request_files(files: list[dict[str, str]]) -> list[tuple[str, Path]]:
-    """从扫描结果中提取 PDF 文件路径，上传字段名固定为 files。"""
+    """从扫描结果中提取文件路径，上传字段名固定为 files。"""
     return [("files", Path(file_info["absolute_path"])) for file_info in files]
 
 
@@ -335,9 +339,11 @@ def _build_parse_result(
     response: object,
     markdown_path: str | None,
 ) -> dict[str, object]:
-    """构造 PDF 解析结果，保留源文件信息和接口响应摘要。"""
+    """构造解析结果，保留源文件信息和接口响应摘要。"""
     return {
-        "file_type": "pdf",
+        "file_type": file_info.get("file_ext", "pdf"),
+        "id": file_info.get("id"),
+        "file_uid": file_info.get("file_uid"),
         "file_name": file_info["file_name"],
         "absolute_path": file_info["absolute_path"],
         "parse_status": parse_status,
