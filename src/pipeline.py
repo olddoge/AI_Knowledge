@@ -7,7 +7,7 @@ from threading import Event
 from typing import Callable
 
 from src.config import get_bool_config, get_int_config, get_required_config
-from src.data_cleaner.clean_task import run_clean_task
+from src.data_cleaner.clean_task import CleanTaskConfig, run_clean_task
 from src.database import DatabaseConfig, build_database_config
 from src.file_scanner import scan_files_to_database
 from src.lightrag_ingest import run_lightrag_upload_task
@@ -23,6 +23,7 @@ class PipelineConfig:
     db_config: DatabaseConfig
     ignored_file_types: set[str]
     parse_task_config: ParseTaskConfig
+    clean_task_config: CleanTaskConfig
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,23 @@ def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
             ),
             enable_logging=get_bool_config(config, "ENABLE_LOGGING", True),
         ),
+        clean_task_config=CleanTaskConfig(
+            db_config=db_config,
+            lightrag_server_url=get_required_config(config, "LIGHTRAG_SERVER_URL"),
+            poll_interval_seconds=get_int_config(
+                config,
+                "CLEAN_TASK_POLL_INTERVAL_SECONDS",
+                default=10,
+                min_value=1,
+            ),
+            batch_size=get_int_config(
+                config,
+                "CLEAN_TASK_BATCH_SIZE",
+                default=5,
+                min_value=1,
+            ),
+            enable_logging=get_bool_config(config, "ENABLE_LOGGING", True),
+        ),
     )
 
 
@@ -84,7 +102,10 @@ def _build_tasks(config: PipelineConfig, stop_event: Event) -> list[PipelineTask
             name="解析任务",
             runner=lambda: run_parse_task(config.parse_task_config, stop_event),
         ),
-        PipelineTask(name="清洗任务", runner=run_clean_task),
+        PipelineTask(
+            name="清洗任务",
+            runner=lambda: run_clean_task(config.clean_task_config, stop_event),
+        ),
         PipelineTask(name="上传 LightRAG 任务", runner=run_lightrag_upload_task),
     ]
 

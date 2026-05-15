@@ -77,14 +77,15 @@ class RagFileRepository:
         if not file_ids:
             return
 
+        placeholders = ", ".join(["%s"] * len(file_ids))
         with self._connection.cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 UPDATE rag_files
                 SET parse_status = %s, updated_at = %s
-                WHERE id IN %s
+                WHERE id IN ({placeholders})
                 """,
-                (parse_status, int(time.time()), tuple(file_ids)),
+                (parse_status, int(time.time()), *file_ids),
             )
 
     def recover_processing_parse_files(self) -> int:
@@ -117,6 +118,79 @@ class RagFileRepository:
                 """
                 UPDATE rag_files
                 SET parse_status = -1, updated_at = %s
+                WHERE id = %s
+                """,
+                (int(time.time()), file_id),
+            )
+
+    def fetch_pending_clean_files(self, limit: int) -> list[dict[str, Any]]:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    file_name,
+                    file_uid,
+                    file_ext,
+                    file_hash,
+                    original_path,
+                    parse_path
+                FROM rag_files
+                WHERE clean_status = 0
+                    AND parse_status = 2
+                    AND parse_path <> ''
+                ORDER BY id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return list(cursor.fetchall())
+
+    def update_clean_status(self, file_ids: list[int], clean_status: int) -> None:
+        if not file_ids:
+            return
+
+        placeholders = ", ".join(["%s"] * len(file_ids))
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE rag_files
+                SET clean_status = %s, updated_at = %s
+                WHERE id IN ({placeholders})
+                """,
+                (clean_status, int(time.time()), *file_ids),
+            )
+
+    def recover_processing_clean_files(self) -> int:
+        """将上次中断遗留的清洗中记录恢复为未清洗，便于重启后继续处理。"""
+        with self._connection.cursor() as cursor:
+            affected_rows = cursor.execute(
+                """
+                UPDATE rag_files
+                SET clean_status = 0, updated_at = %s
+                WHERE clean_status = 1
+                """,
+                (int(time.time()),),
+            )
+            return int(affected_rows)
+
+    def update_clean_success(self, file_id: int) -> None:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE rag_files
+                SET clean_status = 2, updated_at = %s
+                WHERE id = %s
+                """,
+                (int(time.time()), file_id),
+            )
+
+    def update_clean_failed(self, file_id: int) -> None:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE rag_files
+                SET clean_status = -1, updated_at = %s
                 WHERE id = %s
                 """,
                 (int(time.time()), file_id),
