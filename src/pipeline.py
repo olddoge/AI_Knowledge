@@ -9,7 +9,6 @@ from typing import Callable
 from src.config import get_bool_config, get_int_config, get_required_config
 from src.data_cleaner.clean_task import CleanTaskConfig, run_clean_task
 from src.database import DatabaseConfig, build_database_config
-from src.file_scanner import scan_files_to_database
 from src.lightrag_ingest import run_lightrag_upload_task
 from src.parse_requester import ParseTaskConfig, run_parse_task
 
@@ -19,9 +18,7 @@ TaskRunner = Callable[[], dict[str, object]]
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    scan_input_path: str
     db_config: DatabaseConfig
-    ignored_file_types: set[str]
     parse_task_config: ParseTaskConfig
     clean_task_config: CleanTaskConfig
 
@@ -33,12 +30,10 @@ class PipelineTask:
 
 
 def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
-    """从环境配置构建主流程运行参数。"""
+    """从环境配置构建解析、清洗和 LightRAG 上传流程参数。"""
     db_config = build_database_config(config)
     return PipelineConfig(
-        scan_input_path=get_required_config(config, "SCAN_INPUT_PATH"),
         db_config=db_config,
-        ignored_file_types=_parse_file_types(config.get("IGNORE_FILE_TYPES", "")),
         parse_task_config=ParseTaskConfig(
             db_config=db_config,
             mineru_server_url=get_required_config(config, "MINERU_SERVER_URL"),
@@ -78,12 +73,12 @@ def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
 
 
 def run_pipeline(config: PipelineConfig, logger: Logger) -> dict[str, dict[str, object]]:
-    """同时启动扫描、解析、清洗和 LightRAG 上传任务，并统一记录任务状态。"""
+    """同时启动解析、清洗和 LightRAG 上传任务，并统一记录任务状态。"""
     stop_event = Event()
     tasks = _build_tasks(config, stop_event)
 
     logger.info("主流程启动，任务数量：%s", len(tasks))
-    print("主流程启动，准备同时执行任务...")
+    print("主流程启动，准备同时执行解析、清洗和 LightRAG 上传任务...")
 
     task_results = _run_tasks(tasks, logger, stop_event)
 
@@ -95,10 +90,6 @@ def run_pipeline(config: PipelineConfig, logger: Logger) -> dict[str, dict[str, 
 def _build_tasks(config: PipelineConfig, stop_event: Event) -> list[PipelineTask]:
     return [
         PipelineTask(
-            name="扫描任务",
-            runner=lambda: _run_scan_task(config, stop_event),
-        ),
-        PipelineTask(
             name="解析任务",
             runner=lambda: run_parse_task(config.parse_task_config, stop_event),
         ),
@@ -108,30 +99,6 @@ def _build_tasks(config: PipelineConfig, stop_event: Event) -> list[PipelineTask
         ),
         PipelineTask(name="上传 LightRAG 任务", runner=run_lightrag_upload_task),
     ]
-
-
-def _run_scan_task(config: PipelineConfig, stop_event: Event) -> dict[str, object]:
-    result = scan_files_to_database(
-        config.scan_input_path,
-        db_config=config.db_config,
-        ignored_file_types=config.ignored_file_types,
-        stop_event=stop_event,
-    )
-
-    if result.get("stopped"):
-        return {
-            "task": "scan",
-            "status": "stopped",
-            "message": "扫描任务已停止，已提交本次已入库记录。",
-            "result": result,
-        }
-
-    return {
-        "task": "scan",
-        "status": "success",
-        "message": "扫描任务完成，扫描结果已写入数据库。",
-        "result": result,
-    }
 
 
 def _run_tasks(
@@ -206,16 +173,3 @@ def _collect_task_result(task: PipelineTask, future, logger: Logger) -> dict[str
         logger.exception("%s 执行失败：%s", task.name, exc)
         print(f"{task.name} 状态：failed，{exc}")
         return failure_result
-
-
-def _parse_file_types(value: str) -> set[str]:
-    """将逗号分隔的文件类型配置转换为小写集合，便于扫描时快速判断。"""
-    file_types: set[str] = set()
-
-    for raw_file_type in value.split(","):
-        # 支持用户配置 pdf、PDF、Docx 等写法，统一规范化后再比较。
-        file_type = raw_file_type.strip().lower().lstrip(".")
-        if file_type:
-            file_types.add(file_type)
-
-    return file_types

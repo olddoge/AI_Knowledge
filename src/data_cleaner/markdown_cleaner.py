@@ -1,10 +1,20 @@
+import html
 import re
 from pathlib import Path
 from typing import Any
 
 
 IMAGE_PATTERN = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
-HTML_SPAN_DIV_PATTERN = re.compile(r"</?(?:span|div)\b[^>]*>", flags=re.IGNORECASE)
+HTML_IMAGE_PATTERN = re.compile(r"<img\b[^>]*\bsrc=[\"']?([^\"'\s>]+)[^>]*>", flags=re.IGNORECASE)
+TOC_ANCHOR_PATTERN = re.compile(r'<a\s+[^>]*(?:id|name)=["\']?_Toc[^>]*>\s*</a>', flags=re.IGNORECASE)
+HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", flags=re.DOTALL)
+NOISE_HTML_TAG_PATTERN = re.compile(
+    r"</?(?:a|span|div|u|font|strong|b|em|i|section|article|header|footer|center)\b[^>]*>",
+    flags=re.IGNORECASE,
+)
+PARAGRAPH_TAG_PATTERN = re.compile(r"</?p\b[^>]*>", flags=re.IGNORECASE)
+HTML_TAG_PATTERN = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>")
+ALLOWED_HTML_TABLE_TAGS = {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "colgroup", "col"}
 ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 PAGE_LINE_PATTERN = re.compile(
     r"^\s*(?:第\s*\d+\s*页|page\s+\d+(?:\s+of\s+\d+)?|\d+\s*/\s*\d+|-+\s*\d+\s*-+|\d+)\s*$",
@@ -33,6 +43,7 @@ def clean_markdown_content(content: str, file_record: dict[str, Any]) -> str:
     """按知识库入库规则清洗 Markdown 文本并补充源文件元信息。"""
     normalized_content = _normalize_line_endings(content)
     normalized_content = _remove_existing_metadata_header(normalized_content)
+    normalized_content = _decode_html_entities(normalized_content)
     normalized_content = _remove_noise_html_tags(normalized_content)
     normalized_content = _replace_garbage_characters(normalized_content)
     normalized_content = _normalize_image_references(normalized_content)
@@ -46,7 +57,8 @@ def clean_markdown_content(content: str, file_record: dict[str, Any]) -> str:
 def extract_image_names(content: str) -> list[str]:
     """提取 Markdown 图片引用中的图片文件名，用于写入 rag_image。"""
     image_names: list[str] = []
-    for image_path in IMAGE_PATTERN.findall(content):
+    image_paths = [*IMAGE_PATTERN.findall(content), *HTML_IMAGE_PATTERN.findall(content)]
+    for image_path in image_paths:
         image_name = Path(image_path.split("#", 1)[0].split("?", 1)[0]).name.strip()
         if image_name and image_name not in image_names:
             image_names.append(image_name)
@@ -58,8 +70,56 @@ def _normalize_line_endings(content: str) -> str:
 
 
 def _remove_noise_html_tags(content: str) -> str:
-    # 只去除展示型干扰标签，保留 table 等语义标签给后续入库使用。
-    return HTML_SPAN_DIV_PATTERN.sub("", content)
+    # 去除解析器产生的目录锚点和展示型标签，保留 table/tr/td/th 等结构标签。
+    cleaned_content = HTML_COMMENT_PATTERN.sub("", content)
+    cleaned_content = TOC_ANCHOR_PATTERN.sub("", cleaned_content)
+    cleaned_content = _normalize_html_image_references(cleaned_content)
+    cleaned_content = NOISE_HTML_TAG_PATTERN.sub("", cleaned_content)
+    cleaned_content = _normalize_paragraph_tags(cleaned_content)
+    cleaned_content = _normalize_allowed_table_tags(cleaned_content)
+    return _remove_unallowed_html_tags(cleaned_content)
+
+
+def _decode_html_entities(content: str) -> str:
+    decoded_content = html.unescape(content)
+    return decoded_content.replace("\xa0", " ")
+
+
+def _normalize_paragraph_tags(content: str) -> str:
+    # 表格单元格里的 p 标签通常只是排版残留，转换为空格以免破坏表格结构。
+    content = re.sub(r"(<t[dh]\b[^>]*>)\s*<p\b[^>]*>", r"\1", content, flags=re.IGNORECASE)
+    content = re.sub(r"</p>\s*(</t[dh]>)", r"\1", content, flags=re.IGNORECASE)
+    content = PARAGRAPH_TAG_PATTERN.sub("\n", content)
+    return content
+
+
+def _normalize_html_image_references(content: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        image_name = Path(match.group(1).split("#", 1)[0].split("?", 1)[0]).name.strip()
+        return f"> [图片引用]{image_name}" if image_name else ""
+
+    return HTML_IMAGE_PATTERN.sub(replace_match, content)
+
+
+def _normalize_allowed_table_tags(content: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        raw_tag = match.group(0)
+        tag_name = match.group(1).lower()
+        if tag_name not in ALLOWED_HTML_TABLE_TAGS:
+            return raw_tag
+        return f"</{tag_name}>" if raw_tag.startswith("</") else f"<{tag_name}>"
+
+    return HTML_TAG_PATTERN.sub(replace_match, content)
+
+
+def _remove_unallowed_html_tags(content: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        tag_name = match.group(1).lower()
+        if tag_name in ALLOWED_HTML_TABLE_TAGS:
+            return match.group(0)
+        return ""
+
+    return HTML_TAG_PATTERN.sub(replace_match, content)
 
 
 def _remove_existing_metadata_header(content: str) -> str:
@@ -83,6 +143,13 @@ def _replace_garbage_characters(content: str) -> str:
         "\xa0": " ",
         "�": "",
         "□": "",
+        "■": "",
+        "●": "",
+        "◆": "",
+        "◇": "",
+        "▪": "",
+        "¤": "",
+        "\\_": "",
     }
     cleaned_content = ZERO_WIDTH_PATTERN.sub("", content)
     for old_value, new_value in replacements.items():
@@ -125,11 +192,11 @@ def _build_metadata_header(file_record: dict[str, Any]) -> str:
     return "\n".join(
         [
             "---",
-            f"source_file_id: {file_record.get('file_uid', '')}",
-            f"source_file_path: {file_record.get('original_path', '')}",
-            f"source_file_name: {file_record.get('file_name', '')}",
-            f"source_file_hash: {file_record.get('file_hash', '')}",
-            f"source_file_ext: {file_record.get('file_ext', '')}",
+            f"源文件ID: {file_record.get('file_uid', '')}",
+            f"源文件路径: {file_record.get('original_path', '')}",
+            f"源文件名称: {file_record.get('file_name', '')}",
+            f"源文件HASH: {file_record.get('file_hash', '')}",
+            f"源文件后缀: {file_record.get('file_ext', '')}",
             "---",
         ]
     )

@@ -101,6 +101,19 @@ class RagFileRepository:
             )
             return int(affected_rows)
 
+    def recover_failed_parse_files(self) -> int:
+        """将上次解析失败的记录恢复为未解析，重启后自动进入重试队列。"""
+        with self._connection.cursor() as cursor:
+            affected_rows = cursor.execute(
+                """
+                UPDATE rag_files
+                SET parse_status = 0, updated_at = %s
+                WHERE parse_status = -1
+                """,
+                (int(time.time()),),
+            )
+            return int(affected_rows)
+
     def update_parse_success(self, file_id: int, parse_path: str) -> None:
         with self._connection.cursor() as cursor:
             cursor.execute(
@@ -169,6 +182,19 @@ class RagFileRepository:
                 UPDATE rag_files
                 SET clean_status = 0, updated_at = %s
                 WHERE clean_status = 1
+                """,
+                (int(time.time()),),
+            )
+            return int(affected_rows)
+
+    def recover_failed_clean_files(self) -> int:
+        """将上次清洗失败的记录恢复为未清洗，重启后自动进入重试队列。"""
+        with self._connection.cursor() as cursor:
+            affected_rows = cursor.execute(
+                """
+                UPDATE rag_files
+                SET clean_status = 0, updated_at = %s
+                WHERE clean_status = -1
                 """,
                 (int(time.time()),),
             )

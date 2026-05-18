@@ -12,7 +12,7 @@ from src.repositories import RagFileRepository
 
 
 PARSE_TASK_MODULE_NAME = "parse_task"
-SUPPORTED_PARSE_FILE_TYPES = {"pdf", "docx"}
+SUPPORTED_PARSE_FILE_TYPES = {"pdf", "docx", "xlsx"}
 
 
 @dataclass(frozen=True)
@@ -29,16 +29,18 @@ def run_parse_task(config: ParseTaskConfig, stop_event: Event | None = None) -> 
     """定时查询待解析文件并调度解析器；该任务会持续运行。"""
     stop_signal = stop_event or Event()
     logger = setup_module_logger(PARSE_TASK_MODULE_NAME, enable_logging=config.enable_logging)
-    recovered_count = _recover_processing_files(config)
+    recovered_processing_count, recovered_failed_count = _recover_parse_files(config)
     logger.info(
-        "解析任务启动，轮询间隔：%s 秒，单批数量：%s，恢复解析中记录：%s",
+        "解析任务启动，轮询间隔：%s 秒，单批数量：%s，恢复解析中记录：%s，恢复解析失败记录：%s",
         config.poll_interval_seconds,
         config.batch_size,
-        recovered_count,
+        recovered_processing_count,
+        recovered_failed_count,
     )
     print(
         f"解析任务已启动，轮询间隔：{config.poll_interval_seconds} 秒，"
-        f"单批数量：{config.batch_size}，恢复解析中记录：{recovered_count}"
+        f"单批数量：{config.batch_size}，恢复解析中记录：{recovered_processing_count}，"
+        f"恢复解析失败记录：{recovered_failed_count}"
     )
 
     while not stop_signal.is_set():
@@ -150,12 +152,13 @@ def _fetch_and_lock_pending_files(config: ParseTaskConfig) -> list[dict[str, Any
         repository.close()
 
 
-def _recover_processing_files(config: ParseTaskConfig) -> int:
+def _recover_parse_files(config: ParseTaskConfig) -> tuple[int, int]:
     repository = RagFileRepository(config.db_config)
     try:
-        recovered_count = repository.recover_processing_parse_files()
+        recovered_processing_count = repository.recover_processing_parse_files()
+        recovered_failed_count = repository.recover_failed_parse_files()
         repository.commit()
-        return recovered_count
+        return recovered_processing_count, recovered_failed_count
     except Exception:
         repository.rollback()
         raise

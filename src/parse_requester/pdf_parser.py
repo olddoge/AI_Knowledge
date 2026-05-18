@@ -27,11 +27,11 @@ def request_pdf_parse(
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
 ) -> list[dict[str, object]]:
-    """请求 MinerU /file_parse 接口解析文件，目前用于 PDF 和 DOCX。"""
+    """请求 MinerU /file_parse 接口解析文件，目前用于 PDF、DOCX 和 XLSX。"""
     logger = setup_module_logger(PDF_PARSE_MODULE_NAME, enable_logging=enable_logging)
 
     if not files:
-        logger.info("没有扫描到 PDF 文件，跳过 PDF 请求解析。")
+        logger.info("没有待解析文件，跳过 MinerU 请求解析。")
         return []
 
     max_workers = max(1, parse_request_concurrency)
@@ -143,10 +143,17 @@ def _save_markdown_from_response(
 
     output_dir = Path(parse_output_path).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{file_info.get('file_uid') or Path(file_info['file_name']).stem}.md"
+    output_file = _build_markdown_output_file(output_dir, file_info)
     output_file.write_text(markdown_content, encoding="utf-8")
     logger.info("PDF markdown 已保存：%s", output_file)
     return str(output_file)
+
+
+def _build_markdown_output_file(output_dir: Path, file_info: dict[str, str]) -> Path:
+    file_name = str(file_info.get("file_name") or Path(file_info["absolute_path"]).name)
+    file_stem = Path(file_name).stem.strip() or str(file_info.get("file_uid") or "parsed_file")
+    file_id = str(file_info.get("id") or file_info.get("file_uid") or "unknown").strip()
+    return output_dir / f"{file_stem}_{file_id}.md"
 
 
 def _extract_markdown_content(response: object, file_info: dict[str, str]) -> str | None:
