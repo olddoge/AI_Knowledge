@@ -156,7 +156,26 @@ def _recover_parse_files(config: ParseTaskConfig) -> tuple[int, int]:
     repository = RagFileRepository(config.db_config)
     try:
         recovered_processing_count = repository.recover_processing_parse_files()
-        recovered_failed_count = repository.recover_failed_parse_files()
+        failed_files = repository.fetch_failed_parse_files()
+        recoverable_failed_files = [
+            file_record
+            for file_record in failed_files
+            if _original_file_exists(file_record.get("original_path"))
+        ]
+        missing_failed_files = [
+            file_record
+            for file_record in failed_files
+            if not _original_file_exists(file_record.get("original_path"))
+        ]
+        repository.update_parse_status(
+            [int(file_record["id"]) for file_record in recoverable_failed_files],
+            parse_status=0,
+        )
+        repository.update_parse_status(
+            [int(file_record["id"]) for file_record in missing_failed_files],
+            parse_status=-1,
+        )
+        recovered_failed_count = len(recoverable_failed_files)
         repository.commit()
         return recovered_processing_count, recovered_failed_count
     except Exception:
@@ -264,3 +283,9 @@ def _markdown_file_exists(markdown_path: object) -> bool:
     if not isinstance(markdown_path, str) or not markdown_path.strip():
         return False
     return Path(markdown_path).exists()
+
+
+def _original_file_exists(original_path: object) -> bool:
+    if not isinstance(original_path, str) or not original_path.strip():
+        return False
+    return Path(original_path).is_file()

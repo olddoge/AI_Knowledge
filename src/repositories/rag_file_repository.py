@@ -73,6 +73,20 @@ class RagFileRepository:
             )
             return list(cursor.fetchall())
 
+    def fetch_failed_parse_files(self) -> list[dict[str, Any]]:
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    original_path
+                FROM rag_files
+                WHERE parse_status = -1
+                ORDER BY id ASC
+                """
+            )
+            return list(cursor.fetchall())
+
     def update_parse_status(self, file_ids: list[int], parse_status: int) -> None:
         if not file_ids:
             return

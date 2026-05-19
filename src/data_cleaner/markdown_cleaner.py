@@ -192,11 +192,7 @@ def _build_metadata_header(file_record: dict[str, Any]) -> str:
     return "\n".join(
         [
             "---",
-            f"源文件ID: {file_record.get('file_uid', '')}",
-            f"源文件路径: {file_record.get('original_path', '')}",
-            f"源文件名称: {file_record.get('file_name', '')}",
-            f"源文件HASH: {file_record.get('file_hash', '')}",
-            f"源文件后缀: {file_record.get('file_ext', '')}",
+            f"文件编号: {file_record.get('id', '')}",
             "---",
         ]
     )
