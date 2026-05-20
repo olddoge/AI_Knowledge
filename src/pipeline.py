@@ -38,7 +38,9 @@ def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
             db_config=db_config,
             mineru_server_url=get_required_config(config, "MINERU_SERVER_URL"),
             parse_output_path=get_required_config(config, "PARSE_OUTPUT_PATH"),
+            image_output_path=get_required_config(config, "IMAGE_OUTPUT_PATH"),
             lightrag_server_url=get_required_config(config, "LIGHTRAG_SERVER_URL"),
+            save_parse_markdown=get_bool_config(config, "SAVE_PARSE_MARKDOWN", False),
             poll_interval_seconds=get_int_config(
                 config,
                 "PARSE_TASK_POLL_INTERVAL_SECONDS",

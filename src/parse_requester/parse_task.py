@@ -4,12 +4,12 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
-from src.data_cleaner.markdown_cleaner import clean_markdown_content, extract_image_names
+from src.data_cleaner.markdown_cleaner import clean_markdown_content
 from src.database import DatabaseConfig
-from src.lightrag_ingest import upload_text_to_lightrag
+from src.lightrag_ingest import upload_texts_to_lightrag
 from src.logging_module import setup_module_logger
 from src.parse_requester.pdf_parser import request_pdf_parse
-from src.repositories import RagFileRepository, RagImageRepository
+from src.repositories import RagFileRepository
 
 
 PARSE_TASK_MODULE_NAME = "parse_task"
@@ -21,7 +21,9 @@ class ParseTaskConfig:
     db_config: DatabaseConfig
     mineru_server_url: str
     parse_output_path: str
+    image_output_path: str
     lightrag_server_url: str
+    save_parse_markdown: bool = False
     poll_interval_seconds: int = 10
     batch_size: int = 5
     enable_logging: bool = True
@@ -95,6 +97,7 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
                 _build_parse_request_files(parse_files),
                 mineru_server_url=config.mineru_server_url,
                 parse_output_path=config.parse_output_path,
+                image_output_path=config.image_output_path,
                 enable_logging=config.enable_logging,
                 parse_request_concurrency=1,
                 parse_request_batch_size=max(1, len(parse_files)),
@@ -103,10 +106,12 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
                 parse_results,
                 config.db_config,
                 config.lightrag_server_url,
+                config.parse_output_path,
+                config.save_parse_markdown,
                 logger,
             )
         except Exception:
-            logger.exception("文件解析批次异常，当前批次文件将标记为解析失败。")
+            logger.exception("Parse batch failed; current batch will be marked as failed.")
             _mark_files_failed(parse_files, config.db_config)
             failed_count += len(parse_files)
 
@@ -175,9 +180,8 @@ def _recover_parse_files(config: ParseTaskConfig) -> tuple[int, int]:
             [int(file_record["id"]) for file_record in missing_failed_files],
             parse_status=-1,
         )
-        recovered_failed_count = len(recoverable_failed_files)
         repository.commit()
-        return recovered_processing_count, recovered_failed_count
+        return recovered_processing_count, len(recoverable_failed_files)
     except Exception:
         repository.rollback()
         raise
@@ -237,12 +241,15 @@ def _save_parse_results(
     parse_results: list[dict[str, object]],
     db_config: DatabaseConfig,
     lightrag_server_url: str,
+    parse_output_path: str,
+    save_parse_markdown: bool,
     logger,
 ) -> tuple[int, int]:
     success_count = 0
     failed_count = 0
     repository = RagFileRepository(db_config)
     try:
+        prepared_results: list[dict[str, object]] = []
         for result in parse_results:
             file_id = int(result["id"])
             markdown_content = result.get("markdown_content")
@@ -250,7 +257,7 @@ def _save_parse_results(
                 repository.update_parse_failed(file_id)
                 failed_count += 1
                 logger.warning(
-                    "文件解析失败或未生成 markdown：%s",
+                    "Parse failed or markdown missing: %s",
                     json.dumps(
                         {
                             "file_name": result.get("file_name", ""),
@@ -263,14 +270,35 @@ def _save_parse_results(
                 )
                 continue
 
-            if _clean_and_upload_parse_result(result, db_config, lightrag_server_url, logger):
-                repository.update_parse_success(file_id)
-                repository.update_clean_success(file_id)
-                success_count += 1
-            else:
+            prepared_result = _clean_parse_result(
+                result,
+                parse_output_path,
+                save_parse_markdown,
+                logger,
+            )
+            if prepared_result is None:
                 repository.update_parse_failed(file_id)
                 repository.update_clean_failed(file_id)
                 failed_count += 1
+                continue
+
+            prepared_results.append(prepared_result)
+
+        if prepared_results:
+            texts = [str(item["cleaned_markdown"]) for item in prepared_results]
+            file_sources = [str(item["file_source"]) for item in prepared_results]
+            if upload_texts_to_lightrag(lightrag_server_url, texts, file_sources, logger):
+                for item in prepared_results:
+                    file_id = int(item["file_id"])
+                    repository.update_parse_success(file_id, str(item["parse_path"]))
+                    repository.update_clean_success(file_id)
+                    success_count += 1
+            else:
+                for item in prepared_results:
+                    file_id = int(item["file_id"])
+                    repository.update_parse_failed(file_id)
+                    repository.update_clean_failed(file_id)
+                    failed_count += 1
         repository.commit()
     except Exception:
         repository.rollback()
@@ -281,39 +309,48 @@ def _save_parse_results(
     return success_count, failed_count
 
 
-def _clean_and_upload_parse_result(
+def _clean_parse_result(
     result: dict[str, object],
-    db_config: DatabaseConfig,
-    lightrag_server_url: str,
+    parse_output_path: str,
+    save_parse_markdown: bool,
     logger,
-) -> bool:
+) -> dict[str, object] | None:
     raw_markdown = str(result["markdown_content"])
     file_record = _build_clean_file_record(result)
     try:
         cleaned_markdown = clean_markdown_content(raw_markdown, file_record)
-        inserted_image_count = _save_image_records(
-            db_config,
-            str(file_record["file_uid"]),
-            extract_image_names(raw_markdown),
-        )
-        if not upload_text_to_lightrag(
-            lightrag_server_url,
-            cleaned_markdown,
-            str(file_record["original_path"]),
-            logger,
-        ):
-            logger.warning("文件上传 LightRAG 失败，将重新进入解析重试：file_id=%s", file_record["id"])
-            return False
+        saved_parse_path = ""
+        if save_parse_markdown:
+            saved_parse_path = _save_cleaned_markdown(cleaned_markdown, file_record, parse_output_path)
+            logger.info(
+                "Cleaned markdown saved before LightRAG upload: file_id=%s, parse_path=%s",
+                file_record["id"],
+                saved_parse_path,
+            )
 
-        logger.info(
-            "文件解析、清洗并上传完成：file_id=%s，图片新增：%s",
-            file_record["id"],
-            inserted_image_count,
-        )
-        return True
+        return {
+            "file_id": file_record["id"],
+            "cleaned_markdown": cleaned_markdown,
+            "file_source": str(file_record["original_path"]),
+            "parse_path": saved_parse_path,
+        }
     except Exception as exc:
-        logger.exception("文件解析后清洗或上传异常：file_id=%s，错误：%s", file_record["id"], exc)
-        return False
+        logger.exception("Clean after parse failed: file_id=%s, error=%s", file_record["id"], exc)
+        return None
+
+
+def _save_cleaned_markdown(
+    cleaned_markdown: str,
+    file_record: dict[str, object],
+    parse_output_path: str,
+) -> str:
+    output_dir = Path(parse_output_path).expanduser().resolve() / "markdown"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    file_id = str(file_record["id"])
+    output_file = output_dir / f"{file_id}.md"
+    output_file.write_text(cleaned_markdown, encoding="utf-8")
+    return output_file.as_posix()
 
 
 def _build_clean_file_record(result: dict[str, object]) -> dict[str, object]:
@@ -324,25 +361,6 @@ def _build_clean_file_record(result: dict[str, object]) -> dict[str, object]:
         "file_ext": result.get("file_type", ""),
         "original_path": result.get("absolute_path", ""),
     }
-
-
-def _save_image_records(db_config: DatabaseConfig, file_uid: str, image_names: list[str]) -> int:
-    if not image_names:
-        return 0
-
-    repository = RagImageRepository(db_config)
-    inserted_count = 0
-    try:
-        for image_name in image_names:
-            if repository.insert_if_not_exists(file_uid, image_name):
-                inserted_count += 1
-        repository.commit()
-        return inserted_count
-    except Exception:
-        repository.rollback()
-        raise
-    finally:
-        repository.close()
 
 
 def _mark_files_failed(files: list[dict[str, Any]], db_config: DatabaseConfig) -> None:

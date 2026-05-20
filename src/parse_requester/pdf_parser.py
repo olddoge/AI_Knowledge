@@ -1,3 +1,6 @@
+import base64
+import binascii
+import hashlib
 import json
 import mimetypes
 import uuid
@@ -9,7 +12,7 @@ from urllib.request import Request, urlopen
 from src.logging_module import setup_module_logger
 
 
-RETURN_IMAGES = False
+RETURN_IMAGES = True
 
 PDF_PARSE_MODULE_NAME = "pdf_parse"
 FILE_PARSE_PATH = "/file_parse"
@@ -22,6 +25,7 @@ def request_pdf_parse(
     files: list[dict[str, str]],
     mineru_server_url: str,
     parse_output_path: str,
+    image_output_path: str,
     enable_logging: bool = True,
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
@@ -45,6 +49,7 @@ def request_pdf_parse(
                 file_batch,
                 mineru_server_url,
                 parse_output_path,
+                image_output_path,
                 logger,
                 index + 1,
                 len(file_batches),
@@ -68,6 +73,7 @@ def _request_pdf_parse_batch(
     files: list[dict[str, str]],
     mineru_server_url: str,
     parse_output_path: str,
+    image_output_path: str,
     logger,
     batch_index: int,
     batch_count: int,
@@ -117,7 +123,12 @@ def _request_pdf_parse_batch(
                 "success",
                 status_code,
                 response_success,
-                _get_markdown_content_from_response(response_json, file_info, logger),
+                _get_markdown_content_from_response(
+                    response_json,
+                    file_info,
+                    image_output_path,
+                    logger,
+                ),
             )
             for file_info in files
         ]
@@ -141,32 +152,158 @@ def _is_response_success(status_code: int | None) -> bool:
 def _get_markdown_content_from_response(
     response: object,
     file_info: dict[str, str],
+    image_output_path: str,
     logger,
 ) -> str | None:
-    markdown_content = _extract_markdown_content(response, file_info)
+    result_item = _extract_result_item(response, file_info)
+    markdown_content = _get_markdown_from_result_item(result_item)
     if not markdown_content:
         logger.warning(
             "PDF markdown not found: %s",
             json.dumps({"file_name": file_info.get("file_name", "")}, ensure_ascii=False),
         )
         return None
-    return markdown_content
+    image_name_map = _save_images_from_result_item(result_item, file_info, image_output_path, logger)
+    return _replace_markdown_image_names(markdown_content, image_name_map)
 
 
 def _extract_markdown_content(response: object, file_info: dict[str, str]) -> str | None:
+    return _get_markdown_from_result_item(_extract_result_item(response, file_info))
+
+
+def _extract_result_item(response: object, file_info: dict[str, str]) -> object:
     if not isinstance(response, dict):
         return None
 
-    results = response.get("results")
+    results = response.get("results") or response.get("result")
     if isinstance(results, dict):
-        result_item = _find_result_item_from_dict(results, file_info)
-        return _get_markdown_from_result_item(result_item)
+        return _find_result_item_from_dict(results, file_info)
 
     if isinstance(results, list):
-        result_item = _find_result_item_from_list(results, file_info)
-        return _get_markdown_from_result_item(result_item)
+        return _find_result_item_from_list(results, file_info)
 
     return None
+
+
+def _save_images_from_result_item(
+    result_item: object,
+    file_info: dict[str, str],
+    image_output_path: str,
+    logger,
+) -> dict[str, str]:
+    images = _get_images_from_result_item(result_item)
+    if not images:
+        return {}
+
+    file_id = str(file_info["id"])
+    target_dir = Path(image_output_path).expanduser().resolve() / file_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    image_name_map: dict[str, str] = {}
+    for image_name, image_content in images.items():
+        original_name = Path(str(image_name)).name
+        if not original_name:
+            continue
+        if isinstance(image_content, dict):
+            image_content = (
+                image_content.get("content")
+                or image_content.get("base64")
+                or image_content.get("data")
+                or image_content.get("image_base64")
+                or ""
+            )
+
+        try:
+            image_bytes = _decode_base64_image(str(image_content))
+        except ValueError as exc:
+            logger.warning(
+                "PDF image decode failed: %s",
+                json.dumps(
+                    {
+                        "file_name": file_info.get("file_name", ""),
+                        "image_name": original_name,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            continue
+
+        new_name = _build_hashed_image_name(original_name)
+        (target_dir / new_name).write_bytes(image_bytes)
+        image_name_map[original_name] = f"{file_id}/{new_name}"
+
+    if image_name_map:
+        logger.info(
+            "PDF images saved: %s",
+            json.dumps(
+                {
+                    "file_name": file_info.get("file_name", ""),
+                    "image_count": len(image_name_map),
+                    "output_dir": str(target_dir),
+                },
+                ensure_ascii=False,
+            ),
+        )
+    return image_name_map
+
+
+def _get_images_from_result_item(result_item: object) -> dict[str, object]:
+    if not isinstance(result_item, dict):
+        return {}
+
+    images = result_item.get("images")
+    if isinstance(images, dict):
+        return images
+    if isinstance(images, list):
+        normalized_images: dict[str, object] = {}
+        for index, item in enumerate(images, start=1):
+            if isinstance(item, dict):
+                image_name = (
+                    item.get("image_name")
+                    or item.get("file_name")
+                    or item.get("filename")
+                    or item.get("name")
+                    or f"image_{index}.png"
+                )
+                image_content = (
+                    item.get("content")
+                    or item.get("base64")
+                    or item.get("data")
+                    or item.get("image_base64")
+                )
+                if image_content:
+                    normalized_images[str(image_name)] = image_content
+            elif isinstance(item, str):
+                normalized_images[f"image_{index}.png"] = item
+        return normalized_images
+    return {}
+
+
+def _decode_base64_image(image_content: str) -> bytes:
+    content = image_content.strip()
+    if "," in content and content.lower().startswith("data:"):
+        content = content.split(",", 1)[1]
+    try:
+        normalized_content = "".join(content.split())
+        return base64.b64decode(normalized_content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("invalid base64 image content") from exc
+
+
+def _build_hashed_image_name(image_name: str) -> str:
+    path = Path(image_name)
+    suffix = path.suffix
+    stem = path.stem or image_name
+    hashed_stem = hashlib.md5(stem.encode("utf-8")).hexdigest()
+    return f"{hashed_stem}{suffix}"
+
+
+def _replace_markdown_image_names(markdown_content: str, image_name_map: dict[str, str]) -> str:
+    replaced_content = markdown_content
+    for old_name, new_name in image_name_map.items():
+        replaced_content = replaced_content.replace(old_name, new_name)
+    return replaced_content
 
 
 def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str, str]) -> object:

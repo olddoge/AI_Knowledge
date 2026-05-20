@@ -51,7 +51,10 @@ def clean_markdown_content(content: str, file_record: dict[str, Any]) -> str:
     normalized_content = _remove_obvious_page_lines(normalized_content)
     normalized_content = _collapse_blank_lines(normalized_content)
     normalized_content = normalized_content.strip()
-    return f"{_build_metadata_header(file_record)}\n{normalized_content}\n"
+    metadata_header = _build_metadata_header(file_record)
+    if metadata_header:
+        return f"{metadata_header}\n{normalized_content}\n"
+    return f"{normalized_content}\n"
 
 
 def extract_image_names(content: str) -> list[str]:
@@ -95,8 +98,9 @@ def _normalize_paragraph_tags(content: str) -> str:
 
 def _normalize_html_image_references(content: str) -> str:
     def replace_match(match: re.Match[str]) -> str:
-        image_name = Path(match.group(1).split("#", 1)[0].split("?", 1)[0]).name.strip()
-        return f"> [图片引用]{image_name}" if image_name else ""
+        image_path = match.group(1).strip()
+        image_name = Path(image_path.split("#", 1)[0].split("?", 1)[0]).name.strip()
+        return f"![{image_name}]({image_path})" if image_path else ""
 
     return HTML_IMAGE_PATTERN.sub(replace_match, content)
 
@@ -150,6 +154,7 @@ def _replace_garbage_characters(content: str) -> str:
         "▪": "",
         "¤": "",
         "\\_": "",
+        "text_image": "",
     }
     cleaned_content = ZERO_WIDTH_PATTERN.sub("", content)
     for old_value, new_value in replacements.items():
@@ -158,11 +163,7 @@ def _replace_garbage_characters(content: str) -> str:
 
 
 def _normalize_image_references(content: str) -> str:
-    def replace_match(match: re.Match[str]) -> str:
-        image_name = Path(match.group(1).split("#", 1)[0].split("?", 1)[0]).name.strip()
-        return f"> [图片引用]{image_name}" if image_name else ""
-
-    return IMAGE_PATTERN.sub(replace_match, content)
+    return content
 
 
 def _normalize_heading_lines(content: str) -> str:
@@ -189,10 +190,11 @@ def _collapse_blank_lines(content: str) -> str:
 
 
 def _build_metadata_header(file_record: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            "---",
-            f"文件编号: {file_record.get('id', '')}",
-            "---",
-        ]
-    )
+    # return "\n".join(
+    #     [
+    #         "---",
+    #         f"文件编号: {file_record.get('id', '')}",
+    #         "---",
+    #     ]
+    # )
+    return ""

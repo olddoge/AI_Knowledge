@@ -1,7 +1,7 @@
 from logging import Logger
 from pathlib import Path
 
-from src.lightrag_ingest.client import LightRAGUploadError, upload_document_text
+from src.lightrag_ingest.client import LightRAGUploadError, upload_document_texts
 
 
 def upload_text_to_lightrag(
@@ -11,29 +11,39 @@ def upload_text_to_lightrag(
     logger: Logger | None = None,
 ) -> bool:
     """Upload parsed markdown text to LightRAG; log request content only on failure."""
+    return upload_texts_to_lightrag(lightrag_server_url, [text], [file_source], logger)
+
+
+def upload_texts_to_lightrag(
+    lightrag_server_url: str,
+    texts: list[str],
+    file_sources: list[str],
+    logger: Logger | None = None,
+) -> bool:
+    """Upload parsed markdown texts to LightRAG; file_sources and texts are positional pairs."""
     try:
-        upload_document_text(lightrag_server_url, text, file_source)
+        upload_document_texts(lightrag_server_url, texts, file_sources)
         if logger:
-            logger.info("LightRAG text upload succeeded: file_source=%s", file_source)
+            logger.info("LightRAG texts upload succeeded: file_sources=%s", file_sources)
         return True
     except LightRAGUploadError as exc:
         if logger:
             logger.exception(
-                "LightRAG text upload failed: file_source=%s, status_code=%s, "
-                "response=%s, upload_text=%s",
-                exc.file_source,
+                "LightRAG texts upload failed: file_sources=%s, status_code=%s, "
+                "response=%s, upload_texts=%s",
+                exc.file_sources,
                 exc.status_code,
                 exc.response_body,
-                exc.text,
+                exc.texts,
             )
         return False
     except Exception as exc:
         if logger:
             logger.exception(
-                "LightRAG text upload failed: file_source=%s, error=%s, upload_text=%s",
-                file_source,
+                "LightRAG texts upload failed: file_sources=%s, error=%s, upload_texts=%s",
+                file_sources,
                 exc,
-                text,
+                texts,
             )
         return False
 

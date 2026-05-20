@@ -3,7 +3,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-DOCUMENT_TEXT_PATH = "/documents/text"
+DOCUMENT_TEXTS_PATH = "/documents/texts"
 LIGHTRAG_UPLOAD_TIMEOUT_SECONDS = 120
 
 
@@ -12,22 +12,32 @@ class LightRAGUploadError(RuntimeError):
         self,
         message: str,
         *,
-        text: str,
-        file_source: str,
+        texts: list[str],
+        file_sources: list[str],
         status_code: int | None = None,
         response_body: str | None = None,
     ) -> None:
         super().__init__(message)
-        self.text = text
-        self.file_source = file_source
+        self.texts = texts
+        self.file_sources = file_sources
         self.status_code = status_code
         self.response_body = response_body
 
 
 def upload_document_text(lightrag_server_url: str, text: str, file_source: str) -> None:
-    """Post parsed markdown text to LightRAG /documents/text."""
-    upload_url = f"{lightrag_server_url.rstrip('/')}{DOCUMENT_TEXT_PATH}"
-    payload = {"text": text, "file_source": file_source}
+    """Compatibility wrapper for uploading a single parsed text."""
+    upload_document_texts(lightrag_server_url, [text], [file_source])
+
+
+def upload_document_texts(lightrag_server_url: str, texts: list[str], file_sources: list[str]) -> None:
+    """Post parsed markdown texts to LightRAG /documents/texts."""
+    if not texts:
+        raise ValueError("texts must not be empty")
+    if len(texts) != len(file_sources):
+        raise ValueError("texts and file_sources must have the same length")
+
+    upload_url = f"{lightrag_server_url.rstrip('/')}{DOCUMENT_TEXTS_PATH}"
+    payload = {"texts": texts, "file_sources": file_sources}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         upload_url,
@@ -46,9 +56,9 @@ def upload_document_text(lightrag_server_url: str, text: str, file_source: str) 
     except HTTPError as exc:
         response_body = exc.read().decode("utf-8", errors="replace")
         raise LightRAGUploadError(
-            "LightRAG text upload returned an HTTP error.",
-            text=text,
-            file_source=file_source,
+            "LightRAG texts upload returned an HTTP error.",
+            texts=texts,
+            file_sources=file_sources,
             status_code=exc.code,
             response_body=response_body,
         ) from exc
@@ -56,9 +66,9 @@ def upload_document_text(lightrag_server_url: str, text: str, file_source: str) 
     response_json = _try_load_json(response_text)
     if isinstance(response_json, dict) and response_json.get("status") in {"failure", "partial_success"}:
         raise LightRAGUploadError(
-            "LightRAG text upload returned a failure status.",
-            text=text,
-            file_source=file_source,
+            "LightRAG texts upload returned a failure status.",
+            texts=texts,
+            file_sources=file_sources,
             status_code=status_code,
             response_body=response_text,
         )
