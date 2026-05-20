@@ -99,7 +99,12 @@ def _run_clean_cycle(config: CleanTaskConfig, logger, stop_event: Event) -> dict
             image_count += inserted_image_count
             _mark_file_clean_success(config.db_config, int(file_record["id"]))
             success_count += 1
-            if upload_file_to_lightrag(config.lightrag_server_url, clean_path, logger):
+            if upload_file_to_lightrag(
+                config.lightrag_server_url,
+                clean_path,
+                str(file_record.get("original_path") or ""),
+                logger,
+            ):
                 uploaded_count += 1
             logger.info(
                 "文件清洗完成：%s，图片新增：%s",

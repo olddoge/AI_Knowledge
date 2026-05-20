@@ -1,32 +1,59 @@
 from logging import Logger
 from pathlib import Path
 
-from src.lightrag_ingest.client import upload_document
+from src.lightrag_ingest.client import LightRAGUploadError, upload_document_text
+
+
+def upload_text_to_lightrag(
+    lightrag_server_url: str,
+    text: str,
+    file_source: str,
+    logger: Logger | None = None,
+) -> bool:
+    """Upload parsed markdown text to LightRAG; log request content only on failure."""
+    try:
+        upload_document_text(lightrag_server_url, text, file_source)
+        if logger:
+            logger.info("LightRAG text upload succeeded: file_source=%s", file_source)
+        return True
+    except LightRAGUploadError as exc:
+        if logger:
+            logger.exception(
+                "LightRAG text upload failed: file_source=%s, status_code=%s, "
+                "response=%s, upload_text=%s",
+                exc.file_source,
+                exc.status_code,
+                exc.response_body,
+                exc.text,
+            )
+        return False
+    except Exception as exc:
+        if logger:
+            logger.exception(
+                "LightRAG text upload failed: file_source=%s, error=%s, upload_text=%s",
+                file_source,
+                exc,
+                text,
+            )
+        return False
 
 
 def upload_file_to_lightrag(
     lightrag_server_url: str,
     file_path: str | Path,
+    file_source: str | None = None,
     logger: Logger | None = None,
 ) -> bool:
-    """上传单个 Markdown 文件到 LightRAG，失败时记录日志并返回 False。"""
+    """Compatibility wrapper for legacy clean tasks; upload file content as text."""
     path = Path(file_path)
-    try:
-        upload_document(lightrag_server_url, path)
-        if logger:
-            logger.info("文件已上传 LightRAG：%s", path)
-        return True
-    except Exception as exc:
-        # LightRAG 上传失败不影响清洗状态，但必须记录，便于后续排查和补传。
-        if logger:
-            logger.exception("文件上传 LightRAG 失败：%s，错误：%s", path, exc)
-        return False
+    text = path.read_text(encoding="utf-8")
+    return upload_text_to_lightrag(lightrag_server_url, text, file_source or str(path), logger)
 
 
 def run_lightrag_upload_task() -> dict[str, object]:
-    """LightRAG 独立批量上传任务占位入口，单文件上传动作已在本模块实现。"""
+    """Placeholder for a future standalone LightRAG retry/upload queue."""
     return {
         "task": "lightrag_upload",
         "status": "placeholder",
-        "message": "上传 LightRAG 批量任务占位；当前由清洗完成后调用单文件上传动作。",
+        "message": "LightRAG upload is currently triggered after parsing and cleaning.",
     }

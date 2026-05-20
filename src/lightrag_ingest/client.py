@@ -1,50 +1,71 @@
-import mimetypes
-import uuid
-from pathlib import Path
+import json
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-DOCUMENT_UPLOAD_PATH = "/documents/upload"
+DOCUMENT_TEXT_PATH = "/documents/text"
 LIGHTRAG_UPLOAD_TIMEOUT_SECONDS = 120
 
 
-def upload_document(lightrag_server_url: str, file_path: str | Path) -> None:
-    """将清洗后的 Markdown 文件上传到 LightRAG /documents/upload 接口。"""
-    upload_url = f"{lightrag_server_url.rstrip('/')}{DOCUMENT_UPLOAD_PATH}"
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"待上传文件不存在：{path}")
+class LightRAGUploadError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        text: str,
+        file_source: str,
+        status_code: int | None = None,
+        response_body: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.text = text
+        self.file_source = file_source
+        self.status_code = status_code
+        self.response_body = response_body
 
-    boundary = f"----ai-knowledge-rag-{uuid.uuid4().hex}"
-    body = _build_single_file_multipart_body(boundary, "file", path)
+
+def upload_document_text(lightrag_server_url: str, text: str, file_source: str) -> None:
+    """Post parsed markdown text to LightRAG /documents/text."""
+    upload_url = f"{lightrag_server_url.rstrip('/')}{DOCUMENT_TEXT_PATH}"
+    payload = {"text": text, "file_source": file_source}
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
         upload_url,
         data=body,
         headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": "application/json; charset=utf-8",
             "Content-Length": str(len(body)),
         },
         method="POST",
     )
 
-    # 当前流程只负责投递文件；接口返回内容不参与本地状态判断。
-    with urlopen(request, timeout=LIGHTRAG_UPLOAD_TIMEOUT_SECONDS) as response:
-        response.read()
+    try:
+        with urlopen(request, timeout=LIGHTRAG_UPLOAD_TIMEOUT_SECONDS) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+            status_code = getattr(response, "status", None)
+    except HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise LightRAGUploadError(
+            "LightRAG text upload returned an HTTP error.",
+            text=text,
+            file_source=file_source,
+            status_code=exc.code,
+            response_body=response_body,
+        ) from exc
+
+    response_json = _try_load_json(response_text)
+    if isinstance(response_json, dict) and response_json.get("status") in {"failure", "partial_success"}:
+        raise LightRAGUploadError(
+            "LightRAG text upload returned a failure status.",
+            text=text,
+            file_source=file_source,
+            status_code=status_code,
+            response_body=response_text,
+        )
 
 
-def _build_single_file_multipart_body(boundary: str, field_name: str, file_path: Path) -> bytes:
-    body = bytearray()
-    mime_type = mimetypes.guess_type(file_path.name)[0] or "text/markdown"
-
-    body.extend(f"--{boundary}\r\n".encode("utf-8"))
-    body.extend(
-        (
-            f'Content-Disposition: form-data; name="{field_name}"; '
-            f'filename="{file_path.name}"\r\n'
-        ).encode("utf-8")
-    )
-    body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"))
-    body.extend(file_path.read_bytes())
-    body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-    return bytes(body)
+def _try_load_json(response_text: str) -> object:
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        return response_text

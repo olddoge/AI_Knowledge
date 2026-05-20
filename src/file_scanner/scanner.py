@@ -130,19 +130,24 @@ def _is_office_temp_file(path: Path, file_type: str) -> bool:
 
 def _build_file_record(path: Path, file_ext: str) -> dict[str, Any]:
     absolute_path = path.resolve()
+    original_path = _normalize_original_path(absolute_path)
     file_hash = _calculate_file_hash(absolute_path)
     current_timestamp = int(time.time())
 
     return {
         "file_name": path.name,
-        "file_uid": _generate_file_uid(file_hash, str(absolute_path)),
+        "file_uid": _generate_file_uid(file_hash, original_path),
         "file_ext": file_ext,
         "file_size": path.stat().st_size,
         "file_hash": file_hash,
-        "original_path": str(absolute_path),
+        "original_path": original_path,
         "created_at": current_timestamp,
         "updated_at": current_timestamp,
     }
+
+
+def _normalize_original_path(path: Path) -> str:
+    return str(path).replace("\\", "/")
 
 
 def _calculate_file_hash(path: Path) -> str:

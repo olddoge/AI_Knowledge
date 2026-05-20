@@ -128,15 +128,15 @@ class RagFileRepository:
             )
             return int(affected_rows)
 
-    def update_parse_success(self, file_id: int, parse_path: str) -> None:
+    def update_parse_success(self, file_id: int) -> None:
         with self._connection.cursor() as cursor:
             cursor.execute(
                 """
                 UPDATE rag_files
-                SET parse_status = 2, parse_path = %s, updated_at = %s
+                SET parse_status = 2, parse_path = '', updated_at = %s
                 WHERE id = %s
                 """,
-                (parse_path, int(time.time()), file_id),
+                (int(time.time()), file_id),
             )
 
     def update_parse_failed(self, file_id: int) -> None:

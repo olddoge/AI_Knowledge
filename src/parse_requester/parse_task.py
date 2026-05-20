@@ -1,14 +1,15 @@
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any
 
+from src.data_cleaner.markdown_cleaner import clean_markdown_content, extract_image_names
 from src.database import DatabaseConfig
+from src.lightrag_ingest import upload_text_to_lightrag
 from src.logging_module import setup_module_logger
 from src.parse_requester.pdf_parser import request_pdf_parse
-from src.repositories import RagFileRepository
+from src.repositories import RagFileRepository, RagImageRepository
 
 
 PARSE_TASK_MODULE_NAME = "parse_task"
@@ -20,18 +21,19 @@ class ParseTaskConfig:
     db_config: DatabaseConfig
     mineru_server_url: str
     parse_output_path: str
+    lightrag_server_url: str
     poll_interval_seconds: int = 10
     batch_size: int = 5
     enable_logging: bool = True
 
 
 def run_parse_task(config: ParseTaskConfig, stop_event: Event | None = None) -> dict[str, object]:
-    """定时查询待解析文件并调度解析器；该任务会持续运行。"""
+    """Poll pending files, parse them, clean markdown, and upload text to LightRAG."""
     stop_signal = stop_event or Event()
     logger = setup_module_logger(PARSE_TASK_MODULE_NAME, enable_logging=config.enable_logging)
     recovered_processing_count, recovered_failed_count = _recover_parse_files(config)
     logger.info(
-        "解析任务启动，轮询间隔：%s 秒，单批数量：%s，恢复解析中记录：%s，恢复解析失败记录：%s",
+        "Parse task started: interval=%s, batch_size=%s, recovered_processing=%s, recovered_failed=%s",
         config.poll_interval_seconds,
         config.batch_size,
         recovered_processing_count,
@@ -46,16 +48,16 @@ def run_parse_task(config: ParseTaskConfig, stop_event: Event | None = None) -> 
     while not stop_signal.is_set():
         try:
             cycle_result = _run_parse_cycle(config, logger, stop_signal)
-            logger.info("解析任务本轮结果：%s", json.dumps(cycle_result, ensure_ascii=False))
+            logger.info("Parse task cycle result: %s", json.dumps(cycle_result, ensure_ascii=False))
             print(f"解析任务本轮状态：{cycle_result['message']}")
         except Exception as exc:
-            logger.exception("解析任务本轮执行失败：%s", exc)
+            logger.exception("Parse task cycle failed: %s", exc)
             print(f"解析任务本轮执行失败：{exc}")
 
         if stop_signal.wait(config.poll_interval_seconds):
             break
 
-    logger.info("解析任务收到停止信号，已退出轮询。")
+    logger.info("Parse task received stop signal and exited.")
     return {
         "task": "parse",
         "status": "stopped",
@@ -100,6 +102,7 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
             success_count, failed_count = _save_parse_results(
                 parse_results,
                 config.db_config,
+                config.lightrag_server_url,
                 logger,
             )
         except Exception:
@@ -121,10 +124,7 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
     return {
         "task": "parse",
         "status": "running",
-        "message": (
-            f"本轮取出 {len(pending_files)} 条，成功 {success_count} 条，"
-            f"失败 {failed_count} 条。"
-        ),
+        "message": f"本轮取出 {len(pending_files)} 条，成功 {success_count} 条，失败 {failed_count} 条。",
         "result": {
             "picked": len(pending_files),
             "success": success_count,
@@ -236,23 +236,41 @@ def _build_parse_request_files(files: list[dict[str, Any]]) -> list[dict[str, st
 def _save_parse_results(
     parse_results: list[dict[str, object]],
     db_config: DatabaseConfig,
+    lightrag_server_url: str,
     logger,
 ) -> tuple[int, int]:
     success_count = 0
     failed_count = 0
-
     repository = RagFileRepository(db_config)
     try:
         for result in parse_results:
             file_id = int(result["id"])
-            markdown_path = result.get("markdown_path")
-            if result.get("parse_status") == "success" and _markdown_file_exists(markdown_path):
-                repository.update_parse_success(file_id, str(markdown_path))
+            markdown_content = result.get("markdown_content")
+            if result.get("parse_status") != "success" or not _has_markdown_content(markdown_content):
+                repository.update_parse_failed(file_id)
+                failed_count += 1
+                logger.warning(
+                    "文件解析失败或未生成 markdown：%s",
+                    json.dumps(
+                        {
+                            "file_name": result.get("file_name", ""),
+                            "parse_status": result.get("parse_status", ""),
+                            "status_code": result.get("status_code"),
+                            "response_success": result.get("response_success"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                continue
+
+            if _clean_and_upload_parse_result(result, db_config, lightrag_server_url, logger):
+                repository.update_parse_success(file_id)
+                repository.update_clean_success(file_id)
                 success_count += 1
             else:
                 repository.update_parse_failed(file_id)
+                repository.update_clean_failed(file_id)
                 failed_count += 1
-                logger.warning("文件解析失败或未生成 markdown：%s", json.dumps(result, ensure_ascii=False))
         repository.commit()
     except Exception:
         repository.rollback()
@@ -261,6 +279,70 @@ def _save_parse_results(
         repository.close()
 
     return success_count, failed_count
+
+
+def _clean_and_upload_parse_result(
+    result: dict[str, object],
+    db_config: DatabaseConfig,
+    lightrag_server_url: str,
+    logger,
+) -> bool:
+    raw_markdown = str(result["markdown_content"])
+    file_record = _build_clean_file_record(result)
+    try:
+        cleaned_markdown = clean_markdown_content(raw_markdown, file_record)
+        inserted_image_count = _save_image_records(
+            db_config,
+            str(file_record["file_uid"]),
+            extract_image_names(raw_markdown),
+        )
+        if not upload_text_to_lightrag(
+            lightrag_server_url,
+            cleaned_markdown,
+            str(file_record["original_path"]),
+            logger,
+        ):
+            logger.warning("文件上传 LightRAG 失败，将重新进入解析重试：file_id=%s", file_record["id"])
+            return False
+
+        logger.info(
+            "文件解析、清洗并上传完成：file_id=%s，图片新增：%s",
+            file_record["id"],
+            inserted_image_count,
+        )
+        return True
+    except Exception as exc:
+        logger.exception("文件解析后清洗或上传异常：file_id=%s，错误：%s", file_record["id"], exc)
+        return False
+
+
+def _build_clean_file_record(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": result.get("id", ""),
+        "file_uid": result.get("file_uid", ""),
+        "file_name": result.get("file_name", ""),
+        "file_ext": result.get("file_type", ""),
+        "original_path": result.get("absolute_path", ""),
+    }
+
+
+def _save_image_records(db_config: DatabaseConfig, file_uid: str, image_names: list[str]) -> int:
+    if not image_names:
+        return 0
+
+    repository = RagImageRepository(db_config)
+    inserted_count = 0
+    try:
+        for image_name in image_names:
+            if repository.insert_if_not_exists(file_uid, image_name):
+                inserted_count += 1
+        repository.commit()
+        return inserted_count
+    except Exception:
+        repository.rollback()
+        raise
+    finally:
+        repository.close()
 
 
 def _mark_files_failed(files: list[dict[str, Any]], db_config: DatabaseConfig) -> None:
@@ -279,10 +361,8 @@ def _mark_files_failed(files: list[dict[str, Any]], db_config: DatabaseConfig) -
         repository.close()
 
 
-def _markdown_file_exists(markdown_path: object) -> bool:
-    if not isinstance(markdown_path, str) or not markdown_path.strip():
-        return False
-    return Path(markdown_path).exists()
+def _has_markdown_content(markdown_content: object) -> bool:
+    return isinstance(markdown_content, str) and bool(markdown_content.strip())
 
 
 def _original_file_exists(original_path: object) -> bool:

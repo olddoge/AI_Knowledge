@@ -9,7 +9,6 @@ from urllib.request import Request, urlopen
 from src.logging_module import setup_module_logger
 
 
-# 是否返回解析图片，放在文件顶端便于后续统一调整。
 RETURN_IMAGES = False
 
 PDF_PARSE_MODULE_NAME = "pdf_parse"
@@ -27,19 +26,18 @@ def request_pdf_parse(
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
 ) -> list[dict[str, object]]:
-    """请求 MinerU /file_parse 接口解析文件，目前用于 PDF、DOCX 和 XLSX。"""
+    """Request MinerU /file_parse and return extracted markdown text in memory."""
     logger = setup_module_logger(PDF_PARSE_MODULE_NAME, enable_logging=enable_logging)
 
     if not files:
-        logger.info("没有待解析文件，跳过 MinerU 请求解析。")
+        logger.info("No files pending parse; skip MinerU request.")
         return []
 
     max_workers = max(1, parse_request_concurrency)
     batch_size = max(1, parse_request_batch_size)
     file_batches = _chunk_files(files, batch_size)
-    logger.info("文件解析并发请求数量：%s，单次请求文件数量：%s", max_workers, batch_size)
+    logger.info("Parse request concurrency=%s, batch_size=%s", max_workers, batch_size)
 
-    # PDF 解析接口需要等待返回，按批次并发处理，兼顾吞吐量和服务端压力。
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
             executor.submit(
@@ -59,7 +57,6 @@ def request_pdf_parse(
             index = future_to_index[future]
             indexed_results.append((index, future.result()))
 
-    # 并发完成顺序不稳定，这里按扫描顺序还原，方便后续追踪和对账。
     parse_results: list[dict[str, object]] = []
     for _, batch_results in sorted(indexed_results, key=lambda item: item[0]):
         parse_results.extend(batch_results)
@@ -75,20 +72,24 @@ def _request_pdf_parse_batch(
     batch_index: int,
     batch_count: int,
 ) -> list[dict[str, object]]:
-    """批量请求 /file_parse，一个请求中可同时携带多个文件。"""
+    """Batch request /file_parse; logs only file names and response success summary."""
     print(f"正在解析文件批次 {batch_index}/{batch_count}，文件数：{len(files)}")
     endpoint = _build_file_parse_url(mineru_server_url)
     request_fields = _build_parse_fields()
     request_files = _build_request_files(files)
-    request_summary = {
-        "endpoint": endpoint,
-        "fields": request_fields,
-        "files": files,
-        "batch_index": batch_index,
-        "batch_count": batch_count,
-    }
+    file_names = _get_file_names(files)
 
-    logger.info("PDF 解析请求信息：%s", json.dumps(request_summary, ensure_ascii=False))
+    logger.info(
+        "PDF parse request files: %s",
+        json.dumps(
+            {
+                "batch_index": batch_index,
+                "batch_count": batch_count,
+                "file_names": file_names,
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     try:
         status_code, response_text = _post_multipart(
@@ -97,13 +98,14 @@ def _request_pdf_parse_batch(
             files=request_files,
         )
         response_json = _try_load_json(response_text)
+        response_success = _is_response_success(status_code)
         logger.info(
-            "PDF 解析响应：%s",
+            "PDF parse response result: %s",
             json.dumps(
                 {
                     "batch_index": batch_index,
                     "status_code": status_code,
-                    "response": response_json,
+                    "success": response_success,
                 },
                 ensure_ascii=False,
             ),
@@ -114,50 +116,44 @@ def _request_pdf_parse_batch(
                 file_info,
                 "success",
                 status_code,
-                response_json,
-                _save_markdown_from_response(response_json, file_info, parse_output_path, logger),
+                response_success,
+                _get_markdown_content_from_response(response_json, file_info, logger),
             )
             for file_info in files
         ]
     except (OSError, HTTPError, URLError, ValueError) as exc:
-        logger.exception("PDF 解析请求失败：%s", exc)
-        return [_build_parse_result(file_info, "failed", None, str(exc), None) for file_info in files]
+        logger.exception("PDF parse request failed: file_names=%s, error=%s", file_names, exc)
+        return [_build_parse_result(file_info, "failed", None, False, None) for file_info in files]
 
 
 def _chunk_files(files: list[dict[str, str]], batch_size: int) -> list[list[dict[str, str]]]:
-    """按配置的批量大小切分 PDF 文件列表。"""
     return [files[index : index + batch_size] for index in range(0, len(files), batch_size)]
 
 
-def _save_markdown_from_response(
+def _get_file_names(files: list[dict[str, str]]) -> list[str]:
+    return [str(file_info.get("file_name") or Path(file_info["absolute_path"]).name) for file_info in files]
+
+
+def _is_response_success(status_code: int | None) -> bool:
+    return status_code is not None and 200 <= status_code < 300
+
+
+def _get_markdown_content_from_response(
     response: object,
     file_info: dict[str, str],
-    parse_output_path: str,
     logger,
 ) -> str | None:
-    """从 response.results 中提取 markdown，并按原文件名保存为 .md。"""
     markdown_content = _extract_markdown_content(response, file_info)
     if not markdown_content:
-        logger.warning("未找到 PDF markdown 内容：%s", json.dumps(file_info, ensure_ascii=False))
+        logger.warning(
+            "PDF markdown not found: %s",
+            json.dumps({"file_name": file_info.get("file_name", "")}, ensure_ascii=False),
+        )
         return None
-
-    output_dir = Path(parse_output_path).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = _build_markdown_output_file(output_dir, file_info)
-    output_file.write_text(markdown_content, encoding="utf-8")
-    logger.info("PDF markdown 已保存：%s", output_file)
-    return str(output_file)
-
-
-def _build_markdown_output_file(output_dir: Path, file_info: dict[str, str]) -> Path:
-    file_name = str(file_info.get("file_name") or Path(file_info["absolute_path"]).name)
-    file_stem = Path(file_name).stem.strip() or str(file_info.get("file_uid") or "parsed_file")
-    file_id = str(file_info.get("id") or file_info.get("file_uid") or "unknown").strip()
-    return output_dir / f"{file_stem}_{file_id}.md"
+    return markdown_content
 
 
 def _extract_markdown_content(response: object, file_info: dict[str, str]) -> str | None:
-    """兼容常见 results 结构，提取当前文件对应的 markdown 文本。"""
     if not isinstance(response, dict):
         return None
 
@@ -174,7 +170,6 @@ def _extract_markdown_content(response: object, file_info: dict[str, str]) -> st
 
 
 def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str, str]) -> object:
-    """按原文件名、文件 stem、绝对路径等常见 key 查找解析结果。"""
     file_path = Path(file_info["absolute_path"])
     candidate_keys = (
         file_info.get("file_uid", ""),
@@ -188,7 +183,6 @@ def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str,
         if key in results:
             return results[key]
 
-    # 如果只有一个文件结果，接口可能不会使用原文件名作为 key，兜底取唯一结果。
     if len(results) == 1:
         return next(iter(results.values()))
 
@@ -196,7 +190,6 @@ def _find_result_item_from_dict(results: dict[str, object], file_info: dict[str,
 
 
 def _find_result_item_from_list(results: list[object], file_info: dict[str, str]) -> object:
-    """从列表结构中按文件名字段匹配当前文件的解析结果。"""
     file_name = file_info["file_name"]
     file_uid = file_info.get("file_uid", "")
     file_stem = Path(file_name).stem
@@ -224,7 +217,6 @@ def _find_result_item_from_list(results: list[object], file_info: dict[str, str]
 
 
 def _get_markdown_from_result_item(result_item: object) -> str | None:
-    """从单个解析结果中提取 markdown 字段。"""
     if isinstance(result_item, str):
         return result_item
 
@@ -240,7 +232,6 @@ def _get_markdown_from_result_item(result_item: object) -> str | None:
 
 
 def _build_parse_fields() -> list[tuple[str, str]]:
-    """构造 /file_parse 接口需要的 multipart 表单参数。"""
     fields = [
         ("backend", "hybrid-auto-engine"),
         ("parse_method", PDF_PARSE_METHOD),
@@ -258,7 +249,6 @@ def _build_parse_fields() -> list[tuple[str, str]]:
         ("end_page_id", "99999"),
     ]
 
-    # FastAPI 对数组字段支持重复同名字段，这里按 lang_list=ch&lang_list=en 传递。
     for lang in PDF_PARSE_LANG_LIST:
         fields.append(("lang_list", lang))
 
@@ -266,7 +256,6 @@ def _build_parse_fields() -> list[tuple[str, str]]:
 
 
 def _build_request_files(files: list[dict[str, str]]) -> list[tuple[str, Path]]:
-    """从扫描结果中提取文件路径，上传字段名固定为 files。"""
     return [("files", Path(file_info["absolute_path"])) for file_info in files]
 
 
@@ -275,7 +264,6 @@ def _post_multipart(
     fields: list[tuple[str, str]],
     files: list[tuple[str, Path]],
 ) -> tuple[int, str]:
-    """使用标准库发送 multipart/form-data 请求，避免新增第三方依赖。"""
     boundary = f"----ai-knowledge-rag-{uuid.uuid4().hex}"
     body = _build_multipart_body(boundary, fields, files)
     request = Request(
@@ -298,7 +286,6 @@ def _build_multipart_body(
     fields: list[tuple[str, str]],
     files: list[tuple[str, Path]],
 ) -> bytes:
-    """按 multipart/form-data 格式组装字段和文件内容。"""
     body = bytearray()
 
     for name, value in fields:
@@ -327,12 +314,10 @@ def _build_multipart_body(
 
 
 def _build_file_parse_url(mineru_server_url: str) -> str:
-    """拼接 MinerU 服务地址和 /file_parse 接口路径。"""
     return f"{mineru_server_url.rstrip('/')}{FILE_PARSE_PATH}"
 
 
 def _try_load_json(response_text: str) -> object:
-    """优先将响应解析为 JSON，失败时保留原始文本，方便排查接口问题。"""
     try:
         return json.loads(response_text)
     except json.JSONDecodeError:
@@ -343,10 +328,9 @@ def _build_parse_result(
     file_info: dict[str, str],
     parse_status: str,
     status_code: int | None,
-    response: object,
-    markdown_path: str | None,
+    response_success: bool,
+    markdown_content: str | None,
 ) -> dict[str, object]:
-    """构造解析结果，保留源文件信息和接口响应摘要。"""
     return {
         "file_type": file_info.get("file_ext", "pdf"),
         "id": file_info.get("id"),
@@ -355,6 +339,6 @@ def _build_parse_result(
         "absolute_path": file_info["absolute_path"],
         "parse_status": parse_status,
         "status_code": status_code,
-        "markdown_path": markdown_path,
-        "response": response,
+        "response_success": response_success,
+        "markdown_content": markdown_content,
     }
