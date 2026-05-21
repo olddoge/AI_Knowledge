@@ -63,6 +63,7 @@ class RagFileRepository:
                     file_name,
                     file_uid,
                     file_ext,
+                    file_size,
                     original_path
                 FROM rag_files
                 WHERE parse_status = 0

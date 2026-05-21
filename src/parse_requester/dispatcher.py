@@ -9,6 +9,7 @@ def dispatch_parse_requests(
     parse_output_path: str,
     image_output_path: str,
     enable_logging: bool = True,
+    request_timeout_seconds: int = 300,
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
 ) -> dict[str, list[dict[str, object]]]:
@@ -20,6 +21,7 @@ def dispatch_parse_requests(
             parse_output_path=parse_output_path,
             image_output_path=image_output_path,
             enable_logging=enable_logging,
+            request_timeout_seconds=request_timeout_seconds,
             parse_request_concurrency=parse_request_concurrency,
             parse_request_batch_size=parse_request_batch_size,
         ),

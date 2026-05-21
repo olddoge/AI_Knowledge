@@ -41,6 +41,12 @@ def build_pipeline_config(config: dict[str, str]) -> PipelineConfig:
             image_output_path=get_required_config(config, "IMAGE_OUTPUT_PATH"),
             lightrag_server_url=get_required_config(config, "LIGHTRAG_SERVER_URL"),
             save_parse_markdown=get_bool_config(config, "SAVE_PARSE_MARKDOWN", False),
+            parse_request_timeout_seconds=get_int_config(
+                config,
+                "PARSE_REQUEST_TIMEOUT_SECONDS",
+                default=300,
+                min_value=1,
+            ),
             poll_interval_seconds=get_int_config(
                 config,
                 "PARSE_TASK_POLL_INTERVAL_SECONDS",

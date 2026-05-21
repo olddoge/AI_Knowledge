@@ -17,6 +17,7 @@ RETURN_IMAGES = True
 PDF_PARSE_MODULE_NAME = "pdf_parse"
 FILE_PARSE_PATH = "/file_parse"
 REQUEST_TIMEOUT_SECONDS = 300
+LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024
 PDF_PARSE_LANG_LIST = ("ch", "en")
 PDF_PARSE_METHOD = "auto"
 
@@ -27,6 +28,7 @@ def request_pdf_parse(
     parse_output_path: str,
     image_output_path: str,
     enable_logging: bool = True,
+    request_timeout_seconds: int = REQUEST_TIMEOUT_SECONDS,
     parse_request_concurrency: int = 3,
     parse_request_batch_size: int = 2,
 ) -> list[dict[str, object]]:
@@ -40,7 +42,12 @@ def request_pdf_parse(
     max_workers = max(1, parse_request_concurrency)
     batch_size = max(1, parse_request_batch_size)
     file_batches = _chunk_files(files, batch_size)
-    logger.info("Parse request concurrency=%s, batch_size=%s", max_workers, batch_size)
+    logger.info(
+        "Parse request concurrency=%s, batch_size=%s, timeout_seconds=%s",
+        max_workers,
+        batch_size,
+        request_timeout_seconds,
+    )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
@@ -53,6 +60,7 @@ def request_pdf_parse(
                 logger,
                 index + 1,
                 len(file_batches),
+                request_timeout_seconds,
             ): index
             for index, file_batch in enumerate(file_batches)
         }
@@ -77,6 +85,7 @@ def _request_pdf_parse_batch(
     logger,
     batch_index: int,
     batch_count: int,
+    request_timeout_seconds: int,
 ) -> list[dict[str, object]]:
     """Batch request /file_parse; logs only file names and response success summary."""
     print(f"正在解析文件批次 {batch_index}/{batch_count}，文件数：{len(files)}")
@@ -102,6 +111,7 @@ def _request_pdf_parse_batch(
             endpoint,
             fields=request_fields,
             files=request_files,
+            timeout_seconds=request_timeout_seconds,
         )
         response_json = _try_load_json(response_text)
         response_success = _is_response_success(status_code)
@@ -138,7 +148,34 @@ def _request_pdf_parse_batch(
 
 
 def _chunk_files(files: list[dict[str, str]], batch_size: int) -> list[list[dict[str, str]]]:
-    return [files[index : index + batch_size] for index in range(0, len(files), batch_size)]
+    file_batches: list[list[dict[str, str]]] = []
+    current_batch: list[dict[str, str]] = []
+
+    for file_info in files:
+        if _is_large_file(file_info):
+            if current_batch:
+                file_batches.append(current_batch)
+                current_batch = []
+            file_batches.append([file_info])
+            continue
+
+        current_batch.append(file_info)
+        if len(current_batch) >= batch_size:
+            file_batches.append(current_batch)
+            current_batch = []
+
+    if current_batch:
+        file_batches.append(current_batch)
+
+    return file_batches
+
+
+def _is_large_file(file_info: dict[str, str]) -> bool:
+    try:
+        file_size = int(file_info.get("file_size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return file_size > LARGE_FILE_THRESHOLD_BYTES
 
 
 def _get_file_names(files: list[dict[str, str]]) -> list[str]:
@@ -400,6 +437,7 @@ def _post_multipart(
     url: str,
     fields: list[tuple[str, str]],
     files: list[tuple[str, Path]],
+    timeout_seconds: int = REQUEST_TIMEOUT_SECONDS,
 ) -> tuple[int, str]:
     boundary = f"----ai-knowledge-rag-{uuid.uuid4().hex}"
     body = _build_multipart_body(boundary, fields, files)
@@ -413,7 +451,7 @@ def _post_multipart(
         method="POST",
     )
 
-    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with urlopen(request, timeout=timeout_seconds) as response:
         response_text = response.read().decode("utf-8", errors="replace")
         return response.status, response_text
 

@@ -24,6 +24,7 @@ class ParseTaskConfig:
     image_output_path: str
     lightrag_server_url: str
     save_parse_markdown: bool = False
+    parse_request_timeout_seconds: int = 300
     poll_interval_seconds: int = 10
     batch_size: int = 5
     enable_logging: bool = True
@@ -99,6 +100,7 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
                 parse_output_path=config.parse_output_path,
                 image_output_path=config.image_output_path,
                 enable_logging=config.enable_logging,
+                request_timeout_seconds=config.parse_request_timeout_seconds,
                 parse_request_concurrency=1,
                 parse_request_batch_size=max(1, len(parse_files)),
             )
@@ -231,6 +233,7 @@ def _build_parse_request_files(files: list[dict[str, Any]]) -> list[dict[str, st
             "file_uid": str(file_record["file_uid"]),
             "file_name": str(file_record["file_name"]),
             "file_ext": str(file_record["file_ext"]),
+            "file_size": str(file_record.get("file_size") or 0),
             "absolute_path": str(file_record["original_path"]),
         }
         for file_record in files
