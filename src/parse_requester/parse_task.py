@@ -8,12 +8,12 @@ from src.data_cleaner.markdown_cleaner import clean_markdown_content
 from src.database import DatabaseConfig
 from src.lightrag_ingest import upload_texts_to_lightrag
 from src.logging_module import setup_module_logger
-from src.parse_requester.pdf_parser import request_pdf_parse
+from src.parse_requester.mineru_parser import request_mineru_parse
 from src.repositories import RagFileRepository
 
 
 PARSE_TASK_MODULE_NAME = "parse_task"
-SUPPORTED_PARSE_FILE_TYPES = {"pdf", "docx", "xlsx"}
+SUPPORTED_PARSE_FILE_TYPES = {"pdf", "docx", "xlsx", "pptx"}
 
 
 @dataclass(frozen=True)
@@ -94,10 +94,9 @@ def _run_parse_cycle(config: ParseTaskConfig, logger, stop_event: Event) -> dict
     parse_files = _collect_supported_parse_files(grouped_files)
     if parse_files:
         try:
-            parse_results = request_pdf_parse(
+            parse_results = request_mineru_parse(
                 _build_parse_request_files(parse_files),
                 mineru_server_url=config.mineru_server_url,
-                parse_output_path=config.parse_output_path,
                 image_output_path=config.image_output_path,
                 enable_logging=config.enable_logging,
                 request_timeout_seconds=config.parse_request_timeout_seconds,

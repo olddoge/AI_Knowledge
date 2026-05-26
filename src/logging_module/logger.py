@@ -109,6 +109,36 @@ def setup_module_logger(module_name: str, enable_logging: bool = True) -> loggin
     return logger
 
 
+def setup_single_file_module_logger(
+    module_name: str,
+    enable_logging: bool = True,
+    log_dir: str | Path = "logs",
+) -> logging.Logger:
+    """初始化固定文件模块日志器，始终写入 logs/{module_name}.log。"""
+    logger = logging.getLogger(f"ai_knowledge_rag.{module_name}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if not enable_logging:
+        _reset_logger_handlers(logger)
+        logger.addHandler(logging.NullHandler())
+        return logger
+
+    target_path = (Path(log_dir) / f"{module_name}.log").resolve()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == target_path:
+            return logger
+
+    _reset_logger_handlers(logger)
+    file_handler = logging.FileHandler(target_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(file_handler)
+    return logger
+
+
 def _reset_logger_handlers(logger: logging.Logger) -> None:
     """重新初始化日志器时关闭旧 handler，避免重复写入。"""
     for handler in logger.handlers[:]:
