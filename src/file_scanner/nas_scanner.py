@@ -1,6 +1,5 @@
 import hashlib
 import posixpath
-import shlex
 import stat
 import time
 import uuid
@@ -285,33 +284,12 @@ class NasFileScanner:
     ) -> str:
         """计算远程文件 sha256。
 
-        对绝对路径优先使用 NAS 本机命令，通常比 SFTP 下载全量内容再计算更快。
-        如果命令不可用或权限不足，退回到 SFTP 分块读取。该操作只读取文件，不修改 NAS。
+        通过 SFTP 分块读取计算 hash。部分 NAS 账号会把共享目录映射为 SFTP 虚拟根目录，
+        导致 SFTP 可见路径在 SSH shell 中并不存在，因此这里不再调用远程命令。
         """
-        if not remote_path.startswith("/"):
-            return _calculate_sftp_sha256(sftp_client, remote_path)
+        print(f"[scan] Hash via SFTP stream: {remote_path}", flush=True)
+        return _calculate_sftp_sha256(sftp_client, remote_path)
 
-        quoted_path = shlex.quote(remote_path)
-        command_candidates = [
-            f"sha256sum {quoted_path}",
-            f"openssl dgst -sha256 {quoted_path}",
-        ]
-
-        last_error = ""
-        for command in command_candidates:
-            _, stdout, stderr = ssh_client.exec_command(command)
-            exit_code = stdout.channel.recv_exit_status()
-            stdout_text = stdout.read().decode("utf-8", errors="replace").strip()
-            stderr_text = stderr.read().decode("utf-8", errors="replace").strip()
-
-            if exit_code == 0 and stdout_text:
-                return _parse_sha256_output(stdout_text)
-            last_error = stderr_text or stdout_text
-
-        try:
-            return _calculate_sftp_sha256(sftp_client, remote_path)
-        except OSError as exc:
-            raise RuntimeError(f"远程计算文件 hash 失败：{remote_path}，{last_error}") from exc
 
     def _insert_rag_file(self, connection: Any, file_record: dict[str, Any]) -> None:
         """按 rag_files 表结构插入一条待解析记录。"""
