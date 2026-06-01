@@ -19,7 +19,10 @@ NOISE_HTML_TAG_PATTERN = re.compile(
 )
 PARAGRAPH_TAG_PATTERN = re.compile(r"</?p\b[^>]*>", flags=re.IGNORECASE)
 HTML_TAG_PATTERN = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>")
-ALLOWED_HTML_TABLE_TAGS = {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "colgroup", "col"}
+HTML_TABLE_PATTERN = re.compile(r"<table\b[^>]*>.*?</table>", flags=re.IGNORECASE | re.DOTALL)
+HTML_TABLE_ROW_PATTERN = re.compile(r"<tr\b[^>]*>.*?</tr>", flags=re.IGNORECASE | re.DOTALL)
+HTML_TABLE_CELL_PATTERN = re.compile(r"<(td|th)\b[^>]*>(.*?)</\1>", flags=re.IGNORECASE | re.DOTALL)
+HTML_LINE_BREAK_TAG_PATTERN = re.compile(r"<br\b[^>]*>|</p>|</div>|</section>|</article>", flags=re.IGNORECASE)
 ZERO_WIDTH_PATTERN = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 PAGE_LINE_PATTERN = re.compile(
     r"^\s*(?:page\s+\d+(?:\s+of\s+\d+)?|\d+\s*/\s*\d+|-+\s*\d+\s*-+|\d+)\s*$",
@@ -62,6 +65,7 @@ def clean_markdown_content(
     normalized_content = _normalize_line_endings(content)
     normalized_content = _remove_existing_metadata_header(normalized_content)
     normalized_content = _decode_html_entities(normalized_content)
+    normalized_content = _convert_html_tables_to_markdown(normalized_content)
     normalized_content = _remove_noise_html_tags(normalized_content)
     normalized_content = _replace_garbage_characters(normalized_content)
     normalized_content = _remove_markdown_styles(normalized_content)
@@ -96,14 +100,14 @@ def _normalize_line_endings(content: str) -> str:
 
 
 def _remove_noise_html_tags(content: str) -> str:
-    # 保留 table/tr/td/th 等结构性标签，删除解析器常见的展示型 HTML 标签。
+    # Convert useful HTML fragments before removing all remaining tags.
     cleaned_content = HTML_COMMENT_PATTERN.sub("", content)
     cleaned_content = TOC_ANCHOR_PATTERN.sub("", cleaned_content)
     cleaned_content = _normalize_html_image_references(cleaned_content)
+    cleaned_content = HTML_LINE_BREAK_TAG_PATTERN.sub("\n", cleaned_content)
     cleaned_content = NOISE_HTML_TAG_PATTERN.sub("", cleaned_content)
     cleaned_content = _normalize_paragraph_tags(cleaned_content)
-    cleaned_content = _normalize_allowed_table_tags(cleaned_content)
-    return _remove_unallowed_html_tags(cleaned_content)
+    return _remove_all_html_tags(cleaned_content)
 
 
 def _decode_html_entities(content: str) -> str:
@@ -132,25 +136,55 @@ def _get_html_image_path(match: re.Match[str]) -> str:
     return next((group for group in match.groups() if group), "")
 
 
-def _normalize_allowed_table_tags(content: str) -> str:
+def _convert_html_tables_to_markdown(content: str) -> str:
     def replace_match(match: re.Match[str]) -> str:
-        raw_tag = match.group(0)
-        tag_name = match.group(1).lower()
-        if tag_name not in ALLOWED_HTML_TABLE_TAGS:
-            return raw_tag
-        return f"</{tag_name}>" if raw_tag.startswith("</") else f"<{tag_name}>"
+        table_markdown = _html_table_to_markdown(match.group(0))
+        return f"\n{table_markdown}\n" if table_markdown else ""
 
-    return HTML_TAG_PATTERN.sub(replace_match, content)
+    return HTML_TABLE_PATTERN.sub(replace_match, content)
 
 
-def _remove_unallowed_html_tags(content: str) -> str:
-    def replace_match(match: re.Match[str]) -> str:
-        tag_name = match.group(1).lower()
-        if tag_name in ALLOWED_HTML_TABLE_TAGS:
-            return match.group(0)
+def _html_table_to_markdown(table_html: str) -> str:
+    rows: list[list[str]] = []
+
+    for row_match in HTML_TABLE_ROW_PATTERN.finditer(table_html):
+        row_html = row_match.group(0)
+        cells: list[str] = []
+        for cell_match in HTML_TABLE_CELL_PATTERN.finditer(row_html):
+            cells.append(_clean_html_table_cell(cell_match.group(2)))
+        if cells:
+            rows.append(cells)
+
+    if not rows:
         return ""
 
-    return HTML_TAG_PATTERN.sub(replace_match, content)
+    column_count = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    header = normalized_rows[0]
+    data_rows = normalized_rows[1:]
+
+    markdown_lines = [
+        _format_markdown_table_row(header),
+        _format_markdown_table_row(["---"] * column_count),
+    ]
+    markdown_lines.extend(_format_markdown_table_row(row) for row in data_rows)
+    return "\n".join(markdown_lines)
+
+
+def _clean_html_table_cell(cell_html: str) -> str:
+    cell_content = _normalize_html_image_references(cell_html)
+    cell_content = HTML_LINE_BREAK_TAG_PATTERN.sub(" ", cell_content)
+    cell_content = HTML_TAG_PATTERN.sub("", cell_content)
+    cell_content = re.sub(r"\s+", " ", cell_content).strip()
+    return cell_content.replace("|", r"\|")
+
+
+def _format_markdown_table_row(cells: list[str]) -> str:
+    return f"| {' | '.join(cells)} |"
+
+
+def _remove_all_html_tags(content: str) -> str:
+    return HTML_TAG_PATTERN.sub("", content)
 
 
 def _remove_existing_metadata_header(content: str) -> str:
