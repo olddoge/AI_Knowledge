@@ -196,7 +196,7 @@ def _remove_existing_metadata_header(content: str) -> str:
         return content
 
     header = content[: end_index + len("\n---\n")]
-    if "source_file_id:" not in header:
+    if "source_file_id:" not in header and "file_name:" not in header:
         return content
     return content[end_index + len("\n---\n") :]
 
@@ -333,5 +333,24 @@ def _collapse_extra_blank_lines(content: str) -> str:
 
 
 def _build_metadata_header(file_record: dict[str, Any]) -> str:
-    # 当前入库接口只需要正文和 original_path，暂不写入 YAML 头，避免影响检索文本。
+    file_name = _get_metadata_file_name(file_record)
+    if not file_name:
+        return ""
+    escaped_file_name = file_name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'---\nfile_name: "{escaped_file_name}"\n---'
+
+
+def _get_metadata_file_name(file_record: dict[str, Any]) -> str:
+    file_name = str(file_record.get("file_name") or "").strip()
+    if file_name:
+        return file_name
+
+    original_path = str(file_record.get("original_path") or "").strip()
+    if original_path:
+        return Path(original_path).name
+
+    parse_path = str(file_record.get("parse_path") or "").strip()
+    if parse_path:
+        return Path(parse_path).name
+
     return ""
