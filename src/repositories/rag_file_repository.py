@@ -216,6 +216,29 @@ class RagFileRepository:
             )
             return list(cursor.fetchall())
 
+    def fetch_parsed_markdown_files(self, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+        """只读分页获取已经解析出 Markdown 的记录，用于不改库的测试上传入口。"""
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    file_name,
+                    file_uid,
+                    file_ext,
+                    file_hash,
+                    original_path,
+                    parse_path
+                FROM rag_files
+                WHERE parse_status = 2
+                    AND parse_path <> ''
+                ORDER BY id ASC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return list(cursor.fetchall())
+
     def claim_pending_clean_files(self, limit: int) -> list[dict[str, Any]]:
         """原子领取一批待清洗记录，支持多个清洗进程同时运行。
 
