@@ -28,6 +28,7 @@ DEFAULT_PARSE_REQUEST_TIMEOUT_SECONDS = 300
 LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024
 MINERU_PARSE_LANG_LIST = ("ch", "en")
 MINERU_PARSE_METHOD = "auto"
+MINERU_PARSE_BACKEND = "hybrid-http-client"
 RETURN_IMAGES = True
 
 SUPPORTED_MINERU_FILE_TYPES = {"pdf", "docx", "xlsx", "pptx"}
@@ -41,6 +42,7 @@ class MineruParseConfig:
     mineru_server_url: str
     markdown_output_path: str
     markdown_image_path: str
+    mineru_vllm_model_url: str = ""
     task_batch_size: int = DEFAULT_PARSE_TASK_BATCH_SIZE
     request_concurrency: int = DEFAULT_PARSE_REQUEST_CONCURRENCY
     request_batch_size: int = DEFAULT_PARSE_REQUEST_BATCH_SIZE
@@ -54,6 +56,7 @@ def build_mineru_parse_config(config: dict[str, str]) -> MineruParseConfig:
         db_config=build_database_config(config),
         ssh_config=build_ssh_config(config),
         mineru_server_url=get_required_config(config, "MINERU_SERVER_URL"),
+        mineru_vllm_model_url=config.get("MINERU_VLLM_MODEL_URL", "").strip(),
         markdown_output_path=get_required_config(config, "MARKDOWN_OUTPUT_PATH"),
         markdown_image_path=get_required_config(config, "MARKDOWN_IMAGE_PATH"),
         task_batch_size=get_int_config(config, "PARSE_TASK_BATCH_SIZE", default=5, min_value=1),
@@ -316,6 +319,7 @@ class MineruParseWorker:
         parse_results = request_mineru_parse(
             request_files,
             mineru_server_url=self.config.mineru_server_url,
+            mineru_vllm_model_url=self.config.mineru_vllm_model_url,
             image_output_path=self.config.markdown_image_path,
             enable_logging=self.config.enable_logging,
             request_timeout_seconds=self.config.request_timeout_seconds,
@@ -435,6 +439,7 @@ class MineruParseWorker:
 def request_mineru_parse(
     files: list[dict[str, str]],
     mineru_server_url: str,
+    mineru_vllm_model_url: str,
     image_output_path: str,
     enable_logging: bool = True,
     request_timeout_seconds: int = DEFAULT_PARSE_REQUEST_TIMEOUT_SECONDS,
@@ -467,6 +472,7 @@ def request_mineru_parse(
                 _request_mineru_parse_batch,
                 file_batch,
                 mineru_server_url,
+                mineru_vllm_model_url,
                 image_output_path,
                 logger,
                 index + 1,
@@ -491,6 +497,7 @@ def request_mineru_parse(
 def _request_mineru_parse_batch(
     files: list[dict[str, str]],
     mineru_server_url: str,
+    mineru_vllm_model_url: str,
     image_output_path: str,
     logger,
     batch_index: int,
@@ -499,7 +506,7 @@ def _request_mineru_parse_batch(
 ) -> list[dict[str, object]]:
     print(f"正在解析文件批次 {batch_index}/{batch_count}，文件数：{len(files)}")
     endpoint = _build_file_parse_url(mineru_server_url)
-    request_fields = _build_parse_fields()
+    request_fields = _build_parse_fields(mineru_vllm_model_url)
     request_files = _build_request_files(files)
     file_names = _get_file_names(files)
 
@@ -510,6 +517,7 @@ def _request_mineru_parse_batch(
                 "batch_index": batch_index,
                 "batch_count": batch_count,
                 "file_names": file_names,
+                "mineru_vllm_model_url": mineru_vllm_model_url,
             },
             ensure_ascii=False,
         ),
@@ -819,9 +827,9 @@ def _get_markdown_from_result_item(result_item: object) -> str | None:
     return None
 
 
-def _build_parse_fields() -> list[tuple[str, str]]:
+def _build_parse_fields(mineru_vllm_model_url: str) -> list[tuple[str, str]]:
     fields = [
-        ("backend", "hybrid-auto-engine"),
+        ("backend", MINERU_PARSE_BACKEND if mineru_vllm_model_url else "hybrid-auto-engine"),
         ("parse_method", MINERU_PARSE_METHOD),
         ("formula_enable", "true"),
         ("table_enable", "true"),
@@ -836,6 +844,9 @@ def _build_parse_fields() -> list[tuple[str, str]]:
         ("start_page_id", "0"),
         ("end_page_id", "99999"),
     ]
+
+    if mineru_vllm_model_url:
+        fields.append(("server_url", mineru_vllm_model_url))
 
     for lang in MINERU_PARSE_LANG_LIST:
         fields.append(("lang_list", lang))
