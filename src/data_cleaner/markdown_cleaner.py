@@ -1,9 +1,8 @@
-import hashlib
 import html
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 
 IMAGE_PATTERN = re.compile(r"!\[([^\]]*)]\(([^)]+)\)")
@@ -69,7 +68,7 @@ def clean_markdown_content(
     normalized_content = _remove_noise_html_tags(normalized_content)
     normalized_content = _replace_garbage_characters(normalized_content)
     normalized_content = _remove_markdown_styles(normalized_content)
-    normalized_content = _normalize_image_references(normalized_content, markdown_path)
+    normalized_content = _normalize_image_references(normalized_content, file_record, markdown_path)
     normalized_content = _normalize_heading_lines(normalized_content)
     normalized_content = _remove_obvious_page_lines(normalized_content)
     normalized_content = _collapse_extra_blank_lines(normalized_content)
@@ -225,17 +224,21 @@ def _remove_markdown_styles(content: str) -> str:
     return cleaned_content
 
 
-def _normalize_image_references(content: str, markdown_path: str | Path | None) -> str:
-    """规范 Markdown 图片引用，并把图片文件改成 md5 短文件名。
+def _normalize_image_references(
+    content: str,
+    file_record: dict[str, Any],
+    markdown_path: str | Path | None,
+) -> str:
+    """规范 Markdown 图片引用为 /images/<file_id>/<图片名>。
 
-    Markdown 中的图片 alt 统一置空，实际路径文件名与磁盘文件同步改名。
-    如果磁盘文件不存在，仍会更新 Markdown 引用，便于后续资源补齐时保持规则一致。
+    图片文件实际保存在 MARKDOWN_IMAGE_PATH/<file_id>/ 下，这里只调整 Markdown
+    引用，不再修改磁盘图片文件名。
     """
 
     def replace_match(match: re.Match[str]) -> str:
         image_path = _clean_image_path(match.group(2))
-        shortened_path = _shorten_image_path(image_path, markdown_path)
-        return f"![]({shortened_path})" if shortened_path else ""
+        normalized_path = _build_markdown_image_path(image_path, file_record, markdown_path)
+        return f"![]({normalized_path})" if normalized_path else ""
 
     return IMAGE_PATTERN.sub(replace_match, content)
 
@@ -249,29 +252,18 @@ def _get_image_name(image_path: str) -> str:
     return unquote(Path(image_path.split("#", 1)[0].split("?", 1)[0]).name.strip())
 
 
-def _shorten_image_path(image_path: str, markdown_path: str | Path | None) -> str:
+def _build_markdown_image_path(
+    image_path: str,
+    file_record: dict[str, Any],
+    markdown_path: str | Path | None,
+) -> str:
     path_part, suffix_part = _split_image_path_suffix(image_path)
     image_name = _get_image_name(path_part)
     if not image_name:
         return image_path
 
-    short_name = _build_short_image_name(image_name)
-    path_without_name = path_part[: len(path_part) - len(Path(path_part).name)]
-    shortened_path = f"{path_without_name}{quote(short_name)}{suffix_part}"
-
-    source_file = _find_existing_image_file(path_part, markdown_path)
-    if source_file is None:
-        return shortened_path
-
-    target_file = source_file.with_name(short_name)
-    if source_file.resolve() == target_file.resolve():
-        return shortened_path
-    if target_file.exists():
-        return shortened_path
-
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    source_file.rename(target_file)
-    return shortened_path
+    file_id = _get_image_file_id(path_part, file_record, markdown_path)
+    return f"/images/{file_id}/{image_name}{suffix_part}" if file_id else f"/images/{image_name}{suffix_part}"
 
 
 def _split_image_path_suffix(image_path: str) -> tuple[str, str]:
@@ -285,30 +277,25 @@ def _split_image_path_suffix(image_path: str) -> tuple[str, str]:
     return image_path[:suffix_start], image_path[suffix_start:]
 
 
-def _build_short_image_name(image_name: str) -> str:
-    original_name = unquote(image_name)
-    image_suffix = Path(original_name).suffix.lower()
-    short_stem = hashlib.md5(original_name.encode("utf-8")).hexdigest()
-    return f"{short_stem}{image_suffix}"
+def _get_image_file_id(
+    image_path: str,
+    file_record: dict[str, Any],
+    markdown_path: str | Path | None,
+) -> str:
+    decoded_parts = [unquote(part) for part in Path(image_path).parts]
+    if len(decoded_parts) >= 2 and decoded_parts[-2].isdigit():
+        return decoded_parts[-2]
 
+    record_id = str(file_record.get("id") or "").strip()
+    if record_id:
+        return record_id
 
-def _find_existing_image_file(image_path: str, markdown_path: str | Path | None) -> Path | None:
-    path_part, _ = _split_image_path_suffix(image_path)
-    decoded_path = Path(unquote(path_part))
-    candidates: list[Path] = []
+    if markdown_path is not None:
+        parse_stem = Path(markdown_path).stem.strip()
+        if parse_stem.isdigit():
+            return parse_stem
 
-    if decoded_path.is_absolute():
-        candidates.append(decoded_path)
-    else:
-        if markdown_path is not None:
-            candidates.append(Path(markdown_path).expanduser().resolve().parent / decoded_path)
-        candidates.append(Path.cwd() / decoded_path)
-        candidates.append(decoded_path)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
+    return ""
 
 
 def _normalize_heading_lines(content: str) -> str:

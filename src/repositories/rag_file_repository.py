@@ -209,7 +209,7 @@ class RagFileRepository:
                 WHERE clean_status = 0
                     AND parse_status = 2
                     AND parse_path <> ''
-                ORDER BY id ASC
+                ORDER BY file_size ASC
                 LIMIT %s
                 """,
                 (limit,),
@@ -261,7 +261,7 @@ class RagFileRepository:
                 WHERE clean_status = 0
                     AND parse_status = 2
                     AND parse_path <> ''
-                ORDER BY id ASC
+                ORDER BY file_size ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
                 """,

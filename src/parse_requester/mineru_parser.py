@@ -673,7 +673,7 @@ def _save_images_from_result_item(
 
         safe_name = _build_safe_image_name(original_name)
         (target_dir / safe_name).write_bytes(image_bytes)
-        image_name_map[original_name] = f"{file_id}/{safe_name}"
+        image_name_map[original_name] = f"/images/{file_id}/{safe_name}"
 
     if image_name_map:
         logger.info(
@@ -739,9 +739,21 @@ def _build_safe_image_name(image_name: str) -> str:
 
 
 def _replace_markdown_image_names(markdown_content: str, image_name_map: dict[str, str]) -> str:
-    replaced_content = markdown_content
+    def replace_match(match: re.Match[str]) -> str:
+        image_path = match.group(2).strip()
+        image_name = Path(image_path.split("#", 1)[0].split("?", 1)[0]).name
+        new_path = image_name_map.get(image_name)
+        if not new_path:
+            return match.group(0)
+        return f"![{match.group(1)}]({new_path})"
+
+    replaced_content = re.sub(r"!\[([^\]]*)]\(([^)]+)\)", replace_match, markdown_content)
     for old_name, new_name in image_name_map.items():
-        replaced_content = replaced_content.replace(old_name, new_name)
+        replaced_content = re.sub(
+            rf"(?<![\w/.-]){re.escape(old_name)}(?![\w/.-])",
+            new_name,
+            replaced_content,
+        )
     return replaced_content
 
 
